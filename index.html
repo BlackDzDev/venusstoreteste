@@ -1390,48 +1390,6 @@ const firebaseConfig = {
       <button class="source-tab" onclick="switchSource('7ds', 'saga', this)">⚔️ Sagas</button>
     </div>
 
-    <div class="source-panel active" id="7ds-all">
-
-      <!--
-      ================================================================
-        OI LOIS hehe — bota os produtos aqui em baixo!
-
-        Usa o mesmo modelo que tá na categoria Dragon Block C (panel-source).
-        Cada produto é um <div class="product-card"> com:
-          - data-src="saga"  ← ou "plugin", "scripts", "custom"
-          - onclick="openProductPage('ID_DO_PRODUTO')"
-          E no PRODUCTS_DATA lá em baixo no JS, adiciona o objeto:
-            'ID_DO_PRODUTO': { name, subtitle, price, cartName, desc, features, includes, ... }
-
-        Exemplo de card:
-          <div class="product-card" data-src="saga" onclick="openProductPage('7ds-meu-produto')">
-            <div class="card-banner" style="background:linear-gradient(135deg,#2a0f00,#5a1e00)">
-              <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.2">⚔️</div>
-            </div>
-            <div class="card-body">
-              <div class="card-title">Nome do produto</div>
-              <div class="card-desc">Descrição curta.</div>
-              <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div></div>
-            </div>
-            <div class="card-footer">
-              <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>XX</span></div>
-              <button class="add-btn" onclick="event.stopPropagation(); openProductPage('7ds-meu-produto')">Ver Produto →</button>
-            </div>
-          </div>
-
-        Categorias de sub-filtro disponíveis: saga | plugin | scripts | custom
-      ================================================================
-      -->
-
-      <div class="section-title">⚔️ Nanatsu no Taizai — Produtos</div>
-      <div class="products-grid" id="7ds-products-grid">
-        <!-- PRODUTOS AQUI -->
-      </div>
-
-    </div><!-- /7ds-all -->
-
-  </div><!-- /panel-7ds -->
-
   
 
 </main>
@@ -2072,63 +2030,6 @@ const firebaseConfig = {
     'textura-modrinth':  { name:'Textura Modrinth', isDownload:true, cartName:'', price:0 },
 
     // 7DS
-    '7ds-saga-100': {
-      name: 'Saga 7DS — 1 a 100 Missões', subtitle: 'Nanatsu no Taizai • Saga Customizada', tag: 'Novo', emoji: '⚔️',
-      heroBg: 'linear-gradient(135deg, #2a1200, #5a2e00)',
-      heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.5) 0%, transparent 55%)',
-      price: 30, cartName: 'Saga 7DS Customizada | 1–100 Missões', priceNote: 'Entrega em até 14 dias • Estoque ilimitado',
-      desc: 'Saga temática Nanatsu no Taizai do zero. Escolha os personagens, arcos e estilo de missões com total liberdade criativa.',
-      features: [{icon:'📝',label:'Missões',val:'Até 100'},{icon:'📅',label:'Entrega',val:'Até 14 dias'},{icon:'🎨',label:'Tema',val:'Nanatsu no Taizai'},{icon:'🔄',label:'Revisões',val:'1 revisão inclusa'}],
-      includes: ['Tema e personagens escolhidos por você','Desenvolvimento 100% do zero','Compatível com mod 7DS','Entrega via Discord DM']
-    },
-    '7ds-saga-300': {
-      name: 'Saga 7DS — 1 a 300 Missões', subtitle: 'Nanatsu no Taizai • Saga Extensa', tag: '', emoji: '👑',
-      heroBg: 'linear-gradient(135deg, #2a1200, #5a2e00)', heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.5) 0%, transparent 55%)',
-      price: 90, cartName: 'Saga 7DS Customizada | 1–300 Missões', priceNote: 'Entrega em até 21 dias • Estoque ilimitado',
-      desc: 'Saga extensa temática 7DS com subtramas, sagas paralelas e eventos especiais baseados no universo Nanatsu no Taizai.',
-      features: [{icon:'📝',label:'Missões',val:'Até 300'},{icon:'📅',label:'Entrega',val:'Até 21 dias'},{icon:'🎨',label:'Tema',val:'Nanatsu no Taizai'},{icon:'🔄',label:'Revisões',val:'2 revisões inclusas'}],
-      includes: ['Tema e personagens escolhidos por você','Desenvolvimento 100% do zero','Sagas paralelas inclusas','Eventos especiais','Entrega via Discord DM']
-    },
-    '7ds-forms-50': {
-      name: '7DS Custom Forms | 1–50', subtitle: 'Nanatsu no Taizai • Custom Forms', tag: '', emoji: '⚔️',
-      heroBg: 'linear-gradient(135deg, #2a1200, #5a2e00)', heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.5) 0%, transparent 55%)',
-      price: 30, cartName: '7DS Custom Forms | 1–50', priceNote: 'Entrega rápida • Estoque ilimitado',
-      desc: 'Pacote de 1 a 50 Custom Forms temáticas Nanatsu no Taizai. Formas inspiradas nos poderes dos 7 Pecados Capitais.',
-      features: [{icon:'⚔️',label:'Formas',val:'1 a 50'},{icon:'⚡',label:'Entrega',val:'Rápida'},{icon:'🔧',label:'Tema',val:'Nanatsu no Taizai'},{icon:'📦',label:'Estoque',val:'Ilimitado'}],
-      includes: ['Formas temáticas 7DS','Compatível com plugins de transformação','Suporte via Discord']
-    },
-    '7ds-forms-100': {
-      name: '7DS Custom Forms | 51–100', subtitle: 'Nanatsu no Taizai • Custom Forms', tag: '', emoji: '⚔️',
-      heroBg: 'linear-gradient(135deg, #2a1200, #5a2e00)', heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.5) 0%, transparent 55%)',
-      price: 60, cartName: '7DS Custom Forms | 51–100', priceNote: 'Entrega rápida • Estoque ilimitado',
-      desc: 'Pacote de 51 a 100 Custom Forms temáticas 7DS para roster variado e robusto.',
-      features: [{icon:'⚔️',label:'Formas',val:'51 a 100'},{icon:'⚡',label:'Entrega',val:'Rápida'},{icon:'🔧',label:'Tema',val:'Nanatsu no Taizai'},{icon:'📦',label:'Estoque',val:'Ilimitado'}],
-      includes: ['Formas temáticas 7DS','Compatível com plugins de transformação','Suporte via Discord']
-    },
-    '7ds-forms-200': {
-      name: '7DS Custom Forms | 101–200', subtitle: 'Nanatsu no Taizai • Custom Forms Premium', tag: '', emoji: '👑',
-      heroBg: 'linear-gradient(135deg, #2a1200, #5a2e00)', heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.5) 0%, transparent 55%)',
-      price: 110, cartName: '7DS Custom Forms | 101–200', priceNote: 'Entrega rápida • Estoque ilimitado',
-      desc: 'O maior pack de Custom Forms 7DS da Venus Store. 101 a 200 formas épicas do universo Nanatsu no Taizai.',
-      features: [{icon:'👑',label:'Formas',val:'101 a 200'},{icon:'⚡',label:'Entrega',val:'Rápida'},{icon:'🔧',label:'Tema',val:'Nanatsu no Taizai'},{icon:'📦',label:'Estoque',val:'Ilimitado'}],
-      includes: ['Formas temáticas premium 7DS','Compatível com plugins de transformação','Suporte prioritário']
-    },
-    '7ds-plugin-basic': {
-      name: 'Plugin 7DS — Básico', subtitle: 'Nanatsu no Taizai • Plugin / Script', tag: 'Plugin', emoji: '🔌',
-      heroBg: 'linear-gradient(135deg, #1a0800, #3a1800)', heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.4) 0%, transparent 55%)',
-      price: 80, cartName: 'Plugin 7DS Básico', priceNote: 'Entrega rápida • Estoque ilimitado',
-      desc: 'Plugin base para servidores 7DS. Configura habilidades, raças e poderes do universo Nanatsu no Taizai no seu servidor Minecraft.',
-      features: [{icon:'🔌',label:'Tipo',val:'Plugin'},{icon:'⚡',label:'Entrega',val:'Rápida'},{icon:'🎮',label:'Universo',val:'Nanatsu no Taizai'},{icon:'🔧',label:'Suporte',val:'Pós-venda incluso'}],
-      includes: ['Configuração completa do plugin','Habilidades e raças 7DS','Documentação inclusa','Suporte via Discord']
-    },
-    '7ds-script-habilidades': {
-      name: 'Script de Habilidades 7DS', subtitle: 'Nanatsu no Taizai • Script', tag: 'Script', emoji: '📜',
-      heroBg: 'linear-gradient(135deg, #1a0800, #3a1800)', heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(232,160,32,0.4) 0%, transparent 55%)',
-      price: 60, cartName: 'Script Habilidades 7DS', priceNote: 'Entrega em até 7 dias • Estoque ilimitado',
-      desc: 'Script personalizado com mais de 50 habilidades temáticas do universo Nanatsu no Taizai. Cada Pecado com suas habilidades únicas.',
-      features: [{icon:'📜',label:'Tipo',val:'Script'},{icon:'⚡',label:'Habilidades',val:'50+'},{icon:'🎮',label:'Universo',val:'Nanatsu no Taizai'},{icon:'🔧',label:'Entrega',val:'Até 7 dias'}],
-      includes: ['50+ habilidades únicas por Pecado','Totalmente configurável','Documentação completa','Suporte via Discord']
-    },
     // DBV
     'dbv-saga-100': {
       name: 'Saga DBV — 1 a 100 Missões', subtitle: 'Dragon Block Venus • Saga Customizada', tag: 'Novo', emoji: '🌌',
