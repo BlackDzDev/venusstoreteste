@@ -15,14 +15,14 @@
   // ========================
   // CONFIGURE SUA FIREBASE AQUI
   // ========================
-  const firebaseConfig = {
+const firebaseConfig = {
   apiKey: "AIzaSyC5-38DHtoOg-SjO5q5MOeHrQCqkqRxpyI",
   authDomain: "venus-store-8808c.firebaseapp.com",
   projectId: "venus-store-8808c",
   storageBucket: "venus-store-8808c.firebasestorage.app",
   messagingSenderId: "262376721103",
-  appId: "1:262376721103:web:ad3537b991fd02661a85ba"
-  };
+  appId: "1:262376721103:web:5426fe540c62b8c41a85ba"
+};
 
   let app, db, auth;
   try {
@@ -40,12 +40,40 @@
 
   // Carrega vídeos do Firebase quando pronto
   if (window._firebaseReady) {
-    window._fbModules.onAuthStateChanged(auth, user => {
+    window._fbModules.onAuthStateChanged(auth, async user => {
       window._adminUser = user;
-      document.dispatchEvent(new CustomEvent('authChanged', { detail: { user } }));
+      window._adminRole = null;
+      if (user) {
+        try {
+          const roleSnap = await getDoc(doc(db, 'admin_roles', user.uid));
+          if (roleSnap.exists()) {
+            window._adminRole = roleSnap.data();
+          }
+        } catch(e) { console.warn('Roles não carregados:', e); }
+      }
+      document.dispatchEvent(new CustomEvent('authChanged', { detail: { user, role: window._adminRole } }));
     });
     loadAllVideos();
   }
+
+  // Helper: checa se o admin tem permissão
+  window._hasPermission = function(perm) {
+    if (!window._adminUser) return false;
+    const role = window._adminRole;
+    if (!role) return true; // sem role = acesso total (conta raiz)
+    return !!role[perm];
+  };
+
+  // Salva/atualiza role de um usuário (só quem tem manage_roles pode)
+  window._saveAdminRole = async function(uid, roleData) {
+    if (!window._firebaseReady || !window._adminUser) return { ok: false, err: 'Sem permissão.' };
+    if (!window._hasPermission('manage_roles')) return { ok: false, err: 'Você não tem permissão para gerenciar cargos.' };
+    try {
+      const { doc: fDoc, setDoc: fSet } = window._fbModules;
+      await fSet(fDoc(db, 'admin_roles', uid), { ...roleData, updatedAt: new Date().toISOString() });
+      return { ok: true };
+    } catch(e) { return { ok: false, err: e.message }; }
+  };
 
   async function loadAllVideos() {
     try {
@@ -68,22 +96,50 @@
           const prod = window.PRODUCTS_DATA?.[d.id];
           if (prod) prod.photos = data.photos;
         }
+        if (data.heroImg) {
+          const prod = window.PRODUCTS_DATA?.[d.id];
+          if (prod) prod.heroImg = data.heroImg;
+          window._pendingMedia = window._pendingMedia || {};
+          window._pendingMedia[d.id] = window._pendingMedia[d.id] || {};
+          window._pendingMedia[d.id].heroImg = data.heroImg;
+          // Atualiza card estático no DOM
+          let cardBanner = document.querySelector('[data-fb-id="' + d.id + '"] .card-banner');
+          if (!cardBanner) {
+            const sc = document.querySelector('[onclick="openProductPage(\'' + d.id + '\')"]');
+            if (sc) cardBanner = sc.querySelector('.card-banner');
+          }
+          if (cardBanner) {
+            let img = cardBanner.querySelector('img');
+            if (!img) { img = document.createElement('img'); img.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;'; cardBanner.appendChild(img); }
+            img.src = data.heroImg;
+          }
+        }
       });
       document.dispatchEvent(new CustomEvent('videosLoaded'));
     } catch(e) { /* offline */ }
   }
 
   window._saveMedia = async function(productId, youtubeId, photos) {
-    if (!window._firebaseReady || !window._adminUser) return false;
-    const { doc: fDoc, setDoc: fSet } = window._fbModules;
+    if (!window._firebaseReady) return { ok: false, err: 'Firebase não configurado.' };
+    if (!window._adminUser) return { ok: false, err: 'Não autenticado.' };
+    if (!window._hasPermission('manage_media') && !window._hasPermission('manage_links') && !window._hasPermission('manage_products')) {
+      return { ok: false, err: 'Você não tem permissão para salvar mídia.' };
+    }
     try {
+      const { doc: fDoc, setDoc: fSet } = window._fbModules;
       const payload = { updatedAt: new Date().toISOString() };
       if (youtubeId !== undefined) payload.youtubeId = youtubeId;
       if (photos !== undefined) payload.photos = photos;
+      // Use merge so we dont overwrite existing fields
       await fSet(fDoc(db, 'product_media', productId), payload, { merge: true });
-      return true;
-    } catch(e) { console.error(e); return false; }
+      return { ok: true };
+    } catch(e) {
+      console.error('[Firebase saveMedia]', e);
+      return { ok: false, err: e.message || 'Erro desconhecido.' };
+    }
   };
+  // compat
+  window._saveVideo = (id, vid) => window._saveMedia(id, vid, undefined);
 
   // keep old name for compat
   window._saveVideo = async function(productId, youtubeId) {
@@ -103,6 +159,55 @@
     window._adminUser = null;
     document.dispatchEvent(new CustomEvent('authChanged', { detail: { user: null } }));
   };
+
+  // ── PRODUCT CRUD ──────────────────────────────────────────
+  window._saveProduct = async function(product) {
+    if (!window._firebaseReady || !window._adminUser) return { ok: false, err: 'Sem permissão.' };
+    if (!window._hasPermission('manage_products')) return { ok: false, err: 'Você não tem permissão para gerenciar produtos.' };
+    try {
+      const { doc: fDoc, setDoc: fSet } = window._fbModules;
+      await fSet(fDoc(db, 'store_products', product.id), { ...product, savedAt: new Date().toISOString() });
+      return { ok: true };
+    } catch(e) { return { ok: false, err: e.message }; }
+  };
+
+  window._deleteProduct = async function(productId) {
+    if (!window._firebaseReady || !window._adminUser) return { ok: false, err: 'Sem permissão.' };
+    if (!window._hasPermission('manage_products')) return { ok: false, err: 'Você não tem permissão para deletar produtos.' };
+    try {
+      const { doc: fDoc } = window._fbModules;
+      const { deleteDoc } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+      await deleteDoc(fDoc(db, 'store_products', productId));
+      return { ok: true };
+    } catch(e) { return { ok: false, err: e.message }; }
+  };
+
+  window._loadProducts = async function() {
+    if (!window._firebaseReady) return { ok: false, err: 'Firebase não configurado.' };
+    try {
+      const snap = await getDocs(collection(db, 'store_products'));
+      const prods = {};
+      snap.forEach(d => { prods[d.id] = d.data(); });
+      return { ok: true, data: prods };
+    } catch(e) { return { ok: false, err: e.message }; }
+  };
+
+  // Load store_products and merge into PRODUCTS_DATA on start
+  if (window._firebaseReady) {
+    (async () => {
+      try {
+        const snap = await getDocs(collection(db, 'store_products'));
+        snap.forEach(d => {
+          const data = d.data();
+          window._fbProducts = window._fbProducts || {};
+          window._fbProducts[d.id] = data;
+          // merge into runtime PRODUCTS_DATA & render card
+          if (window.PRODUCTS_DATA) window.PRODUCTS_DATA[d.id] = data;
+        });
+        document.dispatchEvent(new CustomEvent('fbProductsLoaded'));
+      } catch(e) { /* offline */ }
+    })();
+  }
 </script>
 
 <style>
@@ -206,6 +311,67 @@
   }
   .pp-gallery-img:hover { border-color: var(--border2); transform: scale(1.02); box-shadow: 0 6px 24px rgba(138,43,226,0.2); }
 
+
+  /* ===== MEDIA CAROUSEL (product page) ===== */
+  .pp-carousel {
+    position: relative; border-radius: 20px; overflow: hidden;
+    height: 280px; margin-bottom: 1.5rem;
+    background: linear-gradient(135deg, #1a0533, #2d0b5a);
+    border: 1px solid var(--border);
+  }
+  .pp-carousel-track {
+    display: flex; height: 100%;
+    transition: transform 0.4s cubic-bezier(0.4,0,0.2,1);
+  }
+  .pp-carousel-slide {
+    flex: 0 0 100%; height: 100%; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #1a0533, #2d0b5a);
+    flex-direction: column; gap: 0.5rem;
+  }
+  .pp-carousel-slide img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  .pp-carousel-slide.slide-video { background: #000; }
+  .pp-carousel-slide.slide-video iframe {
+    position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+  }
+  .pp-carousel-emoji {
+    font-size: 7rem;
+    filter: drop-shadow(0 0 40px rgba(155,48,255,0.9));
+    animation: floatEmoji 3s ease-in-out infinite;
+  }
+  .pp-carousel-tag {
+    display: inline-block;
+    background: linear-gradient(135deg, var(--accent3), var(--accent));
+    border-radius: 20px; padding: 4px 16px;
+    font-family: 'Bebas Neue', cursive;
+    font-size: 0.85rem; letter-spacing: 3px; color: white;
+  }
+  .pp-carousel-arrow {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 50%; width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; color: white; font-size: 1.3rem; z-index: 10;
+    transition: all 0.2s; padding: 0;
+  }
+  .pp-carousel-arrow:hover { background: rgba(155,48,255,0.45); border-color: var(--accent); }
+  .pp-carousel-prev { left: 10px; }
+  .pp-carousel-next { right: 10px; }
+  .pp-carousel-arrow.hidden { display: none !important; }
+  .pp-carousel-dots {
+    position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; z-index: 10;
+  }
+  .pp-carousel-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(255,255,255,0.35);
+    border: none; cursor: pointer; padding: 0; transition: all 0.2s;
+  }
+  .pp-carousel-dot.active { background: white; transform: scale(1.3); }
+
   /* Lightbox */
   .lightbox-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 3000;
@@ -231,6 +397,282 @@
   }
   .lightbox-arrow:hover { background: rgba(155,48,255,0.3); }
 
+
+  /* ══════════════════════════════════════════
+     ADMIN DASHBOARD — REDESIGN
+  ══════════════════════════════════════════ */
+  .admin-dash-overlay {
+    position: fixed; inset: 0; z-index: 5000;
+    background: rgba(4,4,12,0.96); backdrop-filter: blur(12px);
+    display: none; align-items: center; justify-content: center; padding: 1rem;
+  }
+  .admin-dash-overlay.open { display: flex; }
+
+  .admin-dash {
+    width: 100%; max-width: 900px; height: 90vh; max-height: 720px;
+    display: grid; grid-template-rows: auto 1fr; grid-template-columns: 220px 1fr;
+    background: #0b0b18; border: 1px solid rgba(138,43,226,0.3); border-radius: 22px;
+    overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(138,43,226,0.1), inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+
+  /* ── Topbar ── */
+  .adm-topbar {
+    grid-column: 1 / -1; padding: 0 1.5rem; height: 58px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(138,43,226,0.06); border-bottom: 1px solid rgba(138,43,226,0.15);
+    position: relative;
+  }
+  .adm-topbar::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(138,43,226,0.5), transparent);
+  }
+  .adm-topbar-left { display: flex; align-items: center; gap: 12px; }
+  .adm-topbar-icon {
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent3), var(--accent));
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+    box-shadow: 0 0 14px rgba(138,43,226,0.5);
+  }
+  .adm-topbar-title { font-family: 'Bebas Neue', cursive; font-size: 1.3rem; letter-spacing: 4px; color: #fff; }
+  .adm-topbar-sub { font-family: 'Rajdhani', sans-serif; font-size: 0.72rem; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; }
+  .adm-logout-btn {
+    background: rgba(255,23,68,0.08); border: 1px solid rgba(255,23,68,0.25); border-radius: 9px;
+    padding: 7px 14px; color: rgba(255,80,100,0.9); font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.78rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .adm-logout-btn:hover { background: rgba(255,23,68,0.15); border-color: rgba(255,23,68,0.5); }
+  .adm-close-btn {
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 9px;
+    width: 34px; height: 34px; cursor: pointer; color: var(--muted); font-size: 1rem;
+    display: flex; align-items: center; justify-content: center; transition: all 0.2s; margin-left: 8px;
+  }
+  .adm-close-btn:hover { background: rgba(255,23,68,0.12); color: var(--red); border-color: rgba(255,23,68,0.3); }
+
+  /* ── Sidebar ── */
+  .adm-sidebar {
+    background: rgba(0,0,0,0.25); border-right: 1px solid rgba(138,43,226,0.12);
+    padding: 1.2rem 0.8rem; display: flex; flex-direction: column; gap: 4px; overflow-y: auto;
+  }
+  .adm-nav-group-label {
+    font-family: 'Rajdhani', sans-serif; font-size: 0.6rem; font-weight: 700; letter-spacing: 3px;
+    text-transform: uppercase; color: rgba(136,120,170,0.5); padding: 0.8rem 0.6rem 0.4rem;
+  }
+  .adm-nav-btn {
+    display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border-radius: 10px;
+    background: transparent; border: none; color: var(--muted); cursor: pointer; transition: all 0.2s;
+    font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.88rem; letter-spacing: 0.5px;
+    text-align: left; position: relative;
+  }
+  .adm-nav-btn:hover { background: rgba(138,43,226,0.1); color: var(--text); }
+  .adm-nav-btn.active {
+    background: rgba(138,43,226,0.18); color: var(--accent2);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .adm-nav-icon { font-size: 1.1rem; flex-shrink: 0; width: 22px; text-align: center; }
+  .adm-nav-badge {
+    margin-left: auto; background: rgba(138,43,226,0.3); border-radius: 20px;
+    padding: 2px 8px; font-size: 0.65rem; color: var(--accent2); font-family: 'Exo 2', sans-serif; font-weight: 700;
+  }
+  .adm-sidebar-sep { height: 1px; background: rgba(138,43,226,0.1); margin: 8px 4px; }
+
+  /* ── Content area ── */
+  .adm-content { overflow-y: auto; padding: 1.8rem; }
+  .admin-tab-panel { display: none; }
+  .admin-tab-panel.active { display: block; }
+
+  /* ── Section heading ── */
+  .adm-section-head {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.4rem;
+  }
+  .adm-section-title {
+    font-family: 'Bebas Neue', cursive; font-size: 1.4rem; letter-spacing: 3px; color: #fff;
+  }
+  .adm-section-sub { font-family: 'Rajdhani', sans-serif; font-size: 0.75rem; color: var(--muted); margin-top: 2px; letter-spacing: 1px; }
+  .adm-new-btn {
+    background: linear-gradient(135deg, var(--accent3), var(--accent)); border: none; border-radius: 10px;
+    padding: 9px 18px; color: #fff; font-family: 'Rajdhani', sans-serif; font-weight: 700;
+    font-size: 0.85rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s;
+    box-shadow: 0 0 14px rgba(102,16,242,0.35); display: flex; align-items: center; gap: 6px;
+  }
+  .adm-new-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 22px rgba(138,43,226,0.5); }
+
+  /* ── Product list ── */
+  .adm-prod-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 1.4rem; }
+  .adm-prod-card {
+    background: rgba(255,255,255,0.025); border: 1px solid rgba(138,43,226,0.15); border-radius: 12px;
+    padding: 12px 14px; display: flex; align-items: center; gap: 12px; transition: all 0.2s;
+  }
+  .adm-prod-card:hover { background: rgba(138,43,226,0.08); border-color: rgba(138,43,226,0.3); }
+  .adm-prod-emoji {
+    width: 42px; height: 42px; border-radius: 10px; background: rgba(138,43,226,0.12);
+    border: 1px solid rgba(138,43,226,0.2); display: flex; align-items: center; justify-content: center;
+    font-size: 1.3rem; flex-shrink: 0;
+  }
+  .adm-prod-info { flex: 1; min-width: 0; }
+  .adm-prod-name { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.95rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .adm-prod-chips { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+  .adm-chip {
+    background: rgba(138,43,226,0.12); border-radius: 5px; padding: 2px 8px;
+    font-size: 0.65rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; letter-spacing: 1px;
+    color: var(--muted); text-transform: uppercase;
+  }
+  .adm-chip.price { color: var(--gold); background: rgba(89,0,255,0.15); }
+  .adm-prod-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .adm-btn-edit, .adm-btn-del {
+    border-radius: 8px; padding: 7px 13px; font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.75rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; border: 1px solid;
+  }
+  .adm-btn-edit { background: rgba(138,43,226,0.12); color: var(--accent2); border-color: rgba(138,43,226,0.3); }
+  .adm-btn-edit:hover { background: rgba(138,43,226,0.25); }
+  .adm-btn-del { background: rgba(255,23,68,0.07); color: var(--red); border-color: rgba(255,23,68,0.25); }
+  .adm-btn-del:hover { background: rgba(255,23,68,0.18); }
+
+  .adm-empty { text-align: center; padding: 3rem 1rem; }
+  .adm-empty-icon { font-size: 2.5rem; margin-bottom: 0.6rem; opacity: 0.3; }
+  .adm-empty-text { font-family: 'Rajdhani', sans-serif; color: var(--muted); font-size: 0.9rem; letter-spacing: 1px; }
+
+  /* ── Form ── */
+  .adm-form-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 1.4rem;
+    padding-bottom: 1rem; border-bottom: 1px solid rgba(138,43,226,0.15);
+  }
+  .adm-form-header-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent3), var(--accent));
+    display: flex; align-items: center; justify-content: center; font-size: 1rem;
+    box-shadow: 0 0 12px rgba(138,43,226,0.4); flex-shrink: 0;
+  }
+  .adm-form-header-title { font-family: 'Bebas Neue', cursive; font-size: 1.2rem; letter-spacing: 3px; color: #fff; }
+  .adm-form-header-sub { font-family: 'Rajdhani', sans-serif; font-size: 0.72rem; color: var(--muted); letter-spacing: 1px; margin-top: 1px; }
+
+  .adm-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; }
+  .adm-form-full { grid-column: 1 / -1; }
+  .afl { display: flex; flex-direction: column; gap: 5px; }
+  .afl label {
+    font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.68rem;
+    letter-spacing: 2px; text-transform: uppercase; color: rgba(200,102,255,0.7);
+  }
+  .afl input, .afl select, .afl textarea {
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(138,43,226,0.2); border-radius: 9px;
+    padding: 9px 12px; color: var(--text); font-family: 'Exo 2', sans-serif; font-size: 0.87rem;
+    outline: none; transition: all 0.2s; width: 100%;
+  }
+  .afl input:focus, .afl select:focus, .afl textarea:focus {
+    border-color: var(--accent); background: rgba(138,43,226,0.07);
+    box-shadow: 0 0 0 3px rgba(138,43,226,0.1);
+  }
+  .afl textarea { resize: vertical; min-height: 72px; line-height: 1.6; }
+  .afl select option { background: #12121f; }
+
+  .adm-form-actions { display: flex; gap: 0.8rem; margin-top: 1.4rem; align-items: center; }
+  .admin-save-btn {
+    background: linear-gradient(135deg, var(--accent3), var(--accent)); border: none; border-radius: 10px;
+    padding: 11px 26px; color: #fff; font-family: 'Bebas Neue', cursive; font-size: 1.05rem;
+    letter-spacing: 2px; cursor: pointer; transition: all 0.2s; box-shadow: 0 0 14px rgba(102,16,242,0.35);
+  }
+  .admin-save-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 22px rgba(138,43,226,0.5); }
+  .admin-cancel-form-btn {
+    background: transparent; border: 1px solid rgba(138,43,226,0.2); border-radius: 10px;
+    padding: 11px 18px; color: var(--muted); font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.85rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s;
+  }
+  .admin-cancel-form-btn:hover { border-color: var(--border2); color: var(--text); }
+
+  /* ── Spec rows ── */
+  .admin-feat-rows { display: flex; flex-direction: column; gap: 7px; margin-bottom: 8px; }
+  .admin-feat-row { display: grid; grid-template-columns: 52px 1fr 1fr auto; gap: 6px; align-items: center; }
+  .admin-feat-row input { flex: 1; }
+  .admin-feat-remove {
+    background: rgba(255,23,68,0.08); border: 1px solid rgba(255,23,68,0.2); border-radius: 7px;
+    width: 30px; height: 30px; cursor: pointer; color: var(--red); font-size: 0.8rem;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.2s;
+  }
+  .admin-feat-remove:hover { background: rgba(255,23,68,0.2); }
+  .admin-add-feat-btn {
+    background: rgba(138,43,226,0.07); border: 1px dashed rgba(138,43,226,0.3); border-radius: 9px;
+    padding: 8px; color: var(--accent2); font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.8rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; width: 100%;
+  }
+  .admin-add-feat-btn:hover { background: rgba(138,43,226,0.15); border-style: solid; }
+
+  /* ── Media tab ── */
+  .adm-media-select-wrap { margin-bottom: 1.4rem; }
+  .adm-media-card {
+    background: rgba(255,255,255,0.025); border: 1px solid rgba(138,43,226,0.15); border-radius: 14px;
+    padding: 1.2rem; margin-bottom: 1rem; transition: all 0.2s;
+  }
+  .adm-media-card-title {
+    font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.75rem;
+    letter-spacing: 2px; text-transform: uppercase; color: var(--accent2); margin-bottom: 0.8rem;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .adm-media-save-btn {
+    background: rgba(138,43,226,0.15); border: 1px solid rgba(138,43,226,0.35); border-radius: 9px;
+    padding: 8px 18px; color: var(--accent2); font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.8rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; white-space: nowrap;
+  }
+  .adm-media-save-btn:hover { background: rgba(138,43,226,0.28); }
+
+  /* ── Download links tab ── */
+  .adm-link-card {
+    background: rgba(255,255,255,0.02); border: 1px solid rgba(138,43,226,0.12); border-radius: 12px;
+    padding: 0.9rem 1rem; display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: center;
+    transition: border-color 0.2s;
+  }
+  .adm-link-card:focus-within { border-color: rgba(138,43,226,0.35); }
+  .adm-link-icon { font-size: 1.1rem; }
+  .adm-link-inner { display: flex; flex-direction: column; gap: 5px; }
+  .adm-link-label { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.7rem; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); }
+  .adm-link-input {
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(138,43,226,0.18); border-radius: 8px;
+    padding: 8px 12px; color: var(--text); font-family: 'Exo 2', sans-serif; font-size: 0.82rem;
+    outline: none; transition: all 0.2s; width: 100%;
+  }
+  .adm-link-input:focus { border-color: var(--accent); background: rgba(138,43,226,0.07); }
+  .adm-save-links-btn {
+    width: 100%; margin-top: 1.2rem; background: linear-gradient(135deg, var(--accent3), var(--accent));
+    border: none; border-radius: 11px; padding: 13px; color: #fff; font-family: 'Bebas Neue', cursive;
+    font-size: 1.1rem; letter-spacing: 3px; cursor: pointer; transition: all 0.2s;
+    box-shadow: 0 0 16px rgba(102,16,242,0.35);
+  }
+  .adm-save-links-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 28px rgba(138,43,226,0.55); }
+
+  .admin-section-sep { height: 1px; background: rgba(138,43,226,0.12); margin: 1rem 0; }
+
+  .role-perm-row {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+    background: rgba(255,255,255,0.025); border: 1px solid rgba(138,43,226,0.12);
+    font-family: 'Rajdhani', sans-serif; font-size: 0.85rem; font-weight: 600;
+    color: var(--text); cursor: pointer; transition: all 0.2s;
+  }
+  .role-perm-row:hover { background: rgba(138,43,226,0.08); border-color: rgba(138,43,226,0.3); }
+  .role-perm-row input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+  .role-card {
+    background: rgba(255,255,255,0.025); border: 1px solid rgba(138,43,226,0.15); border-radius: 12px;
+    padding: 12px 14px; display: flex; align-items: center; gap: 12px; transition: all 0.2s;
+  }
+  .role-card-info { flex: 1; }
+  .role-card-name { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.95rem; color: var(--text); }
+  .role-card-uid { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--muted); margin-top: 3px; }
+  .role-card-perms { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .role-perm-badge {
+    background: rgba(138,43,226,0.15); border-radius: 5px; padding: 2px 8px;
+    font-size: 0.65rem; font-family: 'Rajdhani', sans-serif; font-weight: 700;
+    color: var(--accent2); letter-spacing: 0.5px;
+  }
+
+  @media(max-width:700px) {
+    .admin-dash { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; max-height: 95vh; }
+    .adm-sidebar { flex-direction: row; overflow-x: auto; padding: 0.6rem; gap: 4px; border-right: none; border-bottom: 1px solid rgba(138,43,226,0.12); }
+    .adm-nav-group-label { display: none; }
+    .adm-sidebar-sep { display: none; }
+    .adm-nav-btn { white-space: nowrap; }
+    .adm-form-grid { grid-template-columns: 1fr; }
+    .admin-feat-row { grid-template-columns: 44px 1fr 1fr auto; }
+  }
+
   /* ===== VIEW SYSTEM ===== */
   .view { display: none; }
   .view.active { display: block; }
@@ -238,11 +680,30 @@
   /* ===== HEADER ===== */
   header {
     position: sticky; top: 0; z-index: 100;
-    background: rgba(8,8,16,0.88); backdrop-filter: blur(20px);
+    background: rgba(8,8,16,0.93); backdrop-filter: blur(22px);
     border-bottom: 1px solid var(--border);
-    padding: 0 2rem; height: 70px;
-    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 1.5rem; height: 64px;
+    display: flex; align-items: center; gap: 0;
   }
+  .header-top { display: contents; }
+  .header-cats {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    gap: 2px; overflow-x: auto; scrollbar-width: none; padding: 0 1rem;
+  }
+  .header-cats::-webkit-scrollbar { display: none; }
+  .h-cat-tab {
+    background: transparent; border: none; border-radius: 8px;
+    padding: 8px 16px; color: var(--muted); font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.82rem; letter-spacing: 1px; cursor: pointer;
+    transition: all 0.2s; text-transform: uppercase; white-space: nowrap; position: relative;
+  }
+  .h-cat-tab::after {
+    content: ''; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+    width: 0; height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; transition: width 0.25s;
+  }
+  .h-cat-tab:hover { color: var(--text); background: rgba(138,43,226,0.08); }
+  .h-cat-tab.active { color: var(--accent2); background: rgba(138,43,226,0.1); }
+  .h-cat-tab.active::after { width: 70%; }
 
   .logo { display: flex; align-items: center; gap: 12px; text-decoration: none; cursor: pointer; }
   .logo-icon {
@@ -328,7 +789,6 @@
   .cat-tab:hover { background: rgba(138,43,226,0.1); border-color: var(--accent); color: var(--text); }
   .cat-tab.active { background: rgba(138,43,226,0.2); border-color: var(--accent); color: var(--accent2); box-shadow: 0 0 15px rgba(138,43,226,0.2); }
   /* tab-7ds uses default purple active style */
-  .cat-tab.tab-dbv.active { background: rgba(0,200,255,0.12); border-color: var(--dbv-accent); color: var(--dbv-accent); box-shadow: 0 0 15px var(--dbv-glow); }
 
   /* ===== CATEGORY PANELS ===== */
   .cat-panel { display: none; }
@@ -723,6 +1183,19 @@
   footer span { color: var(--accent2); }
   .footer-tags { display: flex; justify-content: center; gap: 0.8rem; flex-wrap: wrap; margin-top: 0.8rem; opacity: 0.5; font-size: 0.75rem; }
 
+
+  /* Card hover photo slideshow */
+  .card-banner { position: relative; height: 140px; overflow: hidden; background: linear-gradient(135deg, #1a0533, #2d0b5a); }
+  .card-banner img.main-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; transition: opacity 0.4s; }
+  .card-banner .slide-img {
+    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+    opacity: 0; transition: opacity 0.5s; pointer-events: none;
+  }
+  .card-banner .slide-img.active { opacity: 1; }
+
+  /* Download card style */
+  .dl-card { cursor: pointer; }
+
   /* ===== RESPONSIVE ===== */
   @media (max-width: 800px) {
     .pp-container { grid-template-columns: 1fr; padding: 1rem 1rem 4rem; }
@@ -757,238 +1230,151 @@
 <header>
   <div class="logo" onclick="goToStore()">
     <div class="logo-icon"><img src="https://cdn.discordapp.com/icons/1264342364563177622/ad9d21c5055e71f9c286b1efe1375fda.png" width="50" height="50" alt="Venus Store Logo"></div>
-    <div>
-      <div class="logo-text">Venus Store</div>
-      <div class="logo-sub">Dragon Block Venus</div>
-    </div>
+    <div><div class="logo-text">Venus Store</div><div class="logo-sub"></div></div>
   </div>
+  <nav class="header-cats">
+    <button class="h-cat-tab active" onclick="switchCategory('source',this)">🐉 Dragon Block C</button>
+    <button class="h-cat-tab" onclick="switchCategory('7ds',this)">⚔️ Nanatsu no Taizai</button>
+    <button class="h-cat-tab" onclick="switchCategory('download',this)">⬇️ Downloads</button>
+  </nav>
   <div class="header-right">
     <button class="admin-btn" id="adminHeaderBtn" onclick="handleAdminBtn()">⚙ Admin</button>
-    <button class="cart-btn" onclick="openCart()">
-      🛒 Carrinho
-      <span class="cart-count" id="cartCount">0</span>
-    </button>
+    <button class="cart-btn" onclick="openCart()">🛒 Carrinho<span class="cart-count" id="cartCount">0</span></button>
   </div>
 </header>
 
 <div class="hero">
-  <div class="hero-badge">⚡ Venus Store — Dragon Block Venus</div>
+  <div class="hero-badge">⚡ Venus Store ⚡</div>
   <h1 class="hero-title">Venus Store</h1>
-  <p class="hero-sub">Sagas • Texturas • Custom Forms • Técnicas • Nanatsu</p>
+  <p class="hero-sub">Dragon Block C - Nanatsu No Taizai</p>
 </div>
 
 <main>
 
-  <!-- ===== CATEGORY TABS ===== -->
-  <div class="category-tabs" id="mainCatTabs">
-    <button class="cat-tab active" onclick="switchCategory('dbc', this)">🐉 Dragon Block Venus</button>
-    <button class="cat-tab tab-7ds" onclick="switchCategory('7ds', this)">⚔️ Nanatsu no Taizai</button>
-  </div>
+
 
   <!-- ============================== -->
-  <!-- PANEL: DRAGON BLOCK C -->
+  <!-- PANEL: SOURCE (antigo DBC) -->
   <!-- ============================== -->
-  <div id="panel-dbc" class="cat-panel active">
+  <div id="panel-source" class="cat-panel active">
 
     <!-- Source sub-tabs -->
     <div class="source-tabs">
-      <button class="source-tab active" onclick="switchSource('dbc', 'all', this)">Todos</button>
-      <button class="source-tab" onclick="switchSource('dbc', 'saga', this)">⚔️ Sagas</button>
-      <button class="source-tab" onclick="switchSource('dbc', 'textura', this)">🎨 Texturas</button>
-      <button class="source-tab" onclick="switchSource('dbc', 'tecnicas', this)">⚡ Técnicas</button>
-      <button class="source-tab" onclick="switchSource('dbc', 'custom', this)">💎 Custom Forms</button>
-      <button class="source-tab" onclick="switchSource('dbc', 'scripts', this)">🔌 Scripts / Plugins</button>
+      <button class="source-tab active" onclick="switchSource('source', 'all', this)">Todos</button>
+      <button class="source-tab" onclick="switchSource('source', 'saga', this)">⚔️ Sagas</button>
+      <button class="source-tab" onclick="switchSource('source', 'textura', this)">🎨 Texturas</button>
+      <button class="source-tab" onclick="switchSource('source', 'tecnicas', this)">⚡ Técnicas</button>
+      <button class="source-tab" onclick="switchSource('source', 'custom', this)">💎 Custom Forms</button>
+      <button class="source-tab" onclick="switchSource('source', 'scripts', this)">🔌 Scripts / Plugins</button>
     </div>
 
     <!-- Saga Pronta -->
-    <div class="source-panel active" id="dbc-all" data-source="dbc-all">
-      <div class="section-title">⚔️ Saga Pronta</div>
-      <div class="products-grid">
-        <div class="product-card" data-src="saga" onclick="openProductPage('saga-pronta')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462966536196329684/sagapronta.png?ex=69db8f82&is=69da3e02&hm=1e5b0fa3463bd33b04c868a4672fc29ac1516bedbedc62a9fb1517212d11d690&" alt="Saga Pronta"></div>
-          <div class="card-tag">Bestseller</div>
-          <div class="card-body">
-            <div class="card-title">Saga De Dragon Ball Completa</div>
-            <div class="card-desc">A maior saga Main do Dragon Block C, conta com mais de 600 Missões! Pronta para uso imediato.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>⚡</span> Entrega rápida</div></div>
+    <div class="source-panel active" id="source-all">
+
+      <!-- ══ SAGA ══ -->
+      <div class="source-sub" data-sub="saga">
+        <div class="section-title">⚔️ Saga Pronta</div>
+        <div class="products-grid">
+          <div class="product-card" onclick="openProductPage('saga-pronta')">
+            <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462966536196329684/sagapronta.png?ex=69db8f82&is=69da3e02&hm=1e5b0fa3463bd33b04c868a4672fc29ac1516bedbedc62a9fb1517212d11d690&" alt="Saga Pronta"></div>
+            <div class="card-tag">Bestseller</div>
+            <div class="card-body"><div class="card-title">Saga De Dragon Ball Completa</div><div class="card-desc">A maior saga Main do Dragon Block C, conta com mais de 600 Missões! Pronta para uso imediato.</div><div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>⚡</span> Entrega rápida</div></div></div>
+            <div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>150</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('saga-pronta')">Ver Produto →</button></div>
           </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>150</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('saga-pronta')">Ver Produto →</button>
-          </div>
+        </div>
+        <div class="section-title" style="margin-top:2rem;">🛠️ Sagas Customizadas</div>
+        <div class="products-grid">
+          <div class="product-card" onclick="openProductPage('saga-100')"><div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div><div class="card-body"><div class="card-title">Saga Customizada — 1 a 100 Missões</div><div class="card-desc">Saga customizada do 0 ao 100. Você escolhe o tema e a história.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 14 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>25</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('saga-100')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('saga-200')"><div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div><div class="card-body"><div class="card-title">Saga Customizada — 0 a 200 Missões</div><div class="card-desc">Saga customizada com até 200 missões.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 14 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>50</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('saga-200')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('saga-300')"><div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div><div class="card-body"><div class="card-title">Saga Customizada — 0 a 300 Missões</div><div class="card-desc">Múltiplos arcos, bosses e cutscenes épicas.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 14 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>75</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('saga-300')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('saga-400')"><div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div><div class="card-tag">Premium</div><div class="card-body"><div class="card-title">Saga Customizada — 0 a 400 Missões</div><div class="card-desc">Saga premium com até 400 missões e side quests.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 14 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>100</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('saga-400')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('saga-500')"><div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div><div class="card-tag">Elite</div><div class="card-body"><div class="card-title">Saga Customizada — 0 a 500 Missões</div><div class="card-desc">O pacote máximo para servidores que querem uma saga épica.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 21 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>150</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('saga-500')">Ver Produto →</button></div></div>
         </div>
       </div>
 
-      <div class="section-title" style="margin-top:2.5rem;">🛠️ Sagas Customizadas</div>
-      <div class="products-grid">
-        <div class="product-card" data-src="saga" onclick="openProductPage('saga-100')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div>
-          <div class="card-body">
-            <div class="card-title">Saga Customizada — 1 a 100 Missões</div>
-            <div class="card-desc">Saga customizada do 0 ao 100. Você escolhe o tema e a história.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 14 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>25</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('saga-100')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="saga" onclick="openProductPage('saga-200')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div>
-          <div class="card-body">
-            <div class="card-title">Saga Customizada — 0 a 200 Missões</div>
-            <div class="card-desc">Saga customizada com até 200 missões. Ideal para servidores com história sólida e extensa.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 14 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>50</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('saga-200')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="saga" onclick="openProductPage('saga-300')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div>
-          <div class="card-body">
-            <div class="card-title">Saga Customizada — 0 a 300 Missões</div>
-            <div class="card-desc">Ideal para sagas com múltiplos arcos, bosses e cutscenes épicas.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 14 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>75</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('saga-300')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="saga" onclick="openProductPage('saga-400')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div>
-          <div class="card-tag">Premium</div>
-          <div class="card-body">
-            <div class="card-title">Saga Customizada — 0 a 400 Missões</div>
-            <div class="card-desc">Saga premium com até 400 missões, side quests e eventos especiais.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 14 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>100</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('saga-400')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="saga" onclick="openProductPage('saga-500')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1449024700704493760/1453140658272342262/ABS2GSnuUI6hGiwVWQTbo_kdbKcN3xVygxbNAY9zwiZv1-NRL3wON_HFCP6TYtLb1pdXgug2UK9C25IVWxi1-KluVqaGOgVjZCYBwgtrAq3yWbfFZZCPS2mO8HXNU7p4T0SFNVeIPU-4rl-vrayS5oYXFMPruvFGq1xD355TABqgKMSZ2ohvs1024-rj.png?ex=69dc11b2&is=69dac032&hm=9e1dafd39e6edaf3120d4005cc3c177cb6b3157acf4babdc6edda61b2585da7e&" alt="Saga Custom"></div>
-          <div class="card-tag">Elite</div>
-          <div class="card-body">
-            <div class="card-title">Saga Customizada — 0 a 500 Missões</div>
-            <div class="card-desc">O pacote máximo para servidores que querem uma saga épica e inesquecível.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 21 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>150</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('saga-500')">Ver Produto →</button>
-          </div>
+      <!-- ══ TEXTURA ══ -->
+      <div class="source-sub" data-sub="textura">
+        <div class="section-title">🎨 Texturepacks</div>
+        <div class="products-grid">
+          <div class="product-card" onclick="openProductPage('tex-small')"><div class="card-banner" style="background:linear-gradient(135deg,#0a1a33,#1a2d5a)"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462961063791169536/texturecustomizada.png?ex=69db8a6a&is=69da38ea&hm=cccd7000eb8ad58aa9c871bbf8e88bffd4e793f87c9a336270438f0a0dc7d925&" alt="Texturepack"></div><div class="card-body"><div class="card-title">Texturepack Pequeno</div><div class="card-desc">Textura customizada de até 10 MB. Rápida, leve e com identidade visual única.</div><div class="card-meta"><div class="meta-item"><span>⚡</span> Entrega rápida</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>50</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('tex-small')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('tex-medium')"><div class="card-banner" style="background:linear-gradient(135deg,#0a1a33,#1a2d5a)"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462961063791169536/texturecustomizada.png?ex=69db8a6a&is=69da38ea&hm=cccd7000eb8ad58aa9c871bbf8e88bffd4e793f87c9a336270438f0a0dc7d925&" alt="Texturepack"></div><div class="card-body"><div class="card-title">Texturepack Médio</div><div class="card-desc">Textura customizada de 10 MB a 100 MB. Cobertura completa de blocos e itens.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 3 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>100</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('tex-medium')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('tex-large')"><div class="card-banner" style="background:linear-gradient(135deg,#0a1a33,#1a2d5a)"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462961063791169536/texturecustomizada.png?ex=69db8a6a&is=69da38ea&hm=cccd7000eb8ad58aa9c871bbf8e88bffd4e793f87c9a336270438f0a0dc7d925&" alt="Texturepack"></div><div class="card-tag">Premium</div><div class="card-body"><div class="card-title">Texturepack Grande</div><div class="card-desc">Textura customizada de 100 MB a 1 GB. O máximo em qualidade e cobertura.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 7 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>200</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('tex-large')">Ver Produto →</button></div></div>
         </div>
       </div>
 
-      <div class="section-title" style="margin-top:2.5rem;">🎨 Texturepacks</div>
-      <div class="products-grid">
-        <div class="product-card" data-src="textura" onclick="openProductPage('tex-small')">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0a1a33,#1a2d5a)"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462961063791169536/texturecustomizada.png?ex=69db8a6a&is=69da38ea&hm=cccd7000eb8ad58aa9c871bbf8e88bffd4e793f87c9a336270438f0a0dc7d925&" alt="Texturepack"></div>
-          <div class="card-body">
-            <div class="card-title">Texturepack Pequeno</div>
-            <div class="card-desc">Textura customizada de até 10 MB. Rápida, leve e identidade visual única.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>⚡</span> Entrega rápida</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>50</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('tex-small')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="textura" onclick="openProductPage('tex-medium')">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0a1a33,#1a2d5a)"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462961063791169536/texturecustomizada.png?ex=69db8a6a&is=69da38ea&hm=cccd7000eb8ad58aa9c871bbf8e88bffd4e793f87c9a336270438f0a0dc7d925&" alt="Texturepack"></div>
-          <div class="card-body">
-            <div class="card-title">Texturepack Médio</div>
-            <div class="card-desc">Textura customizada de 10 MB a 100 MB. Cobertura completa de blocos e itens.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 3 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>100</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('tex-medium')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="textura" onclick="openProductPage('tex-large')">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0a1a33,#1a2d5a)"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1462961063791169536/texturecustomizada.png?ex=69db8a6a&is=69da38ea&hm=cccd7000eb8ad58aa9c871bbf8e88bffd4e793f87c9a336270438f0a0dc7d925&" alt="Texturepack"></div>
-          <div class="card-tag">Premium</div>
-          <div class="card-body">
-            <div class="card-title">Texturepack Grande</div>
-            <div class="card-desc">Textura customizada de 100 MB a 1 GB. O máximo em qualidade e cobertura.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 7 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>200</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('tex-large')">Ver Produto →</button>
-          </div>
+      <!-- ══ TÉCNICAS ══ -->
+      <div class="source-sub" data-sub="tecnicas">
+        <div class="section-title">⚡ Técnicas DBC</div>
+        <div class="products-grid">
+          <div class="product-card" onclick="openProductPage('pack-tecnicas')"><div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1492670008646701226/d5d090d3-374e-41ca-b51e-2ddbe48c1d4a.png?ex=69dc2cc6&is=69dadb46&hm=ce9ff56a807c51a0c7399513b490da1e078584ace9b1fa72a3e6a773bee4741f&" alt="Técnicas DBC"></div><div class="card-tag">Kakarot</div><div class="card-body"><div class="card-title">Pack de Técnicas DBC</div><div class="card-desc">Pack com mais de 115 técnicas / poderes para Dragon Block C, inspiradas no Dragon Ball Kakarot.</div><div class="card-meta"><div class="meta-item"><span>⚡</span> Entrega rápida</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>125</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('pack-tecnicas')">Ver Produto →</button></div></div>
         </div>
       </div>
 
-      <div class="section-title" style="margin-top:2.5rem;">⚡ Técnicas DBC</div>
-      <div class="products-grid">
-        <div class="product-card" data-src="tecnicas" onclick="openProductPage('pack-tecnicas')">
-          <div class="card-banner"><img src="https://cdn.discordapp.com/attachments/1358131089280864286/1492670008646701226/d5d090d3-374e-41ca-b51e-2ddbe48c1d4a.png?ex=69dc2cc6&is=69dadb46&hm=ce9ff56a807c51a0c7399513b490da1e078584ace9b1fa72a3e6a773bee4741f&" alt="Técnicas DBC"></div>
-          <div class="card-tag">Kakarot</div>
-          <div class="card-body">
-            <div class="card-title">Pack de Técnicas DBC</div>
-            <div class="card-desc">Pack com mais de 115 técnicas / poderes para Dragon Block C, inspiradas no Dragon Ball Kakarot.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>⚡</span> Entrega rápida</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>125</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('pack-tecnicas')">Ver Produto →</button>
-          </div>
+      <!-- ══ CUSTOM FORMS ══ -->
+      <div class="source-sub" data-sub="custom">
+        <div class="section-title">💎 CustomForms [DBCADDITIONS / NPCDBC]</div>
+        <p style="color:var(--muted);font-family:'Rajdhani',sans-serif;font-size:0.9rem;margin-bottom:1rem;">Formas customizadas com foco em qualidade, organização e compatibilidade total.</p>
+        <div class="npcdbc-grid">
+          <div class="npcdbc-card" onclick="openProductPage('npcdbc-50')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 1–50</div><div class="npcdbc-range">Formas de 1 a 50</div></div><div><div class="npcdbc-price">R$ 25</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
+          <div class="npcdbc-card" onclick="openProductPage('npcdbc-100')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 51–100</div><div class="npcdbc-range">Formas de 51 a 100</div></div><div><div class="npcdbc-price">R$ 50</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
+          <div class="npcdbc-card" onclick="openProductPage('npcdbc-150')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 101–150</div><div class="npcdbc-range">Formas de 101 a 150</div></div><div><div class="npcdbc-price">R$ 75</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
+          <div class="npcdbc-card" onclick="openProductPage('npcdbc-200')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 151–200</div><div class="npcdbc-range">Formas de 151 a 200</div></div><div><div class="npcdbc-price">R$ 100</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
+          <div class="npcdbc-card" onclick="openProductPage('npcdbc-300')"><div class="npcdbc-icon">👑</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 201–300</div><div class="npcdbc-range">Formas de 201 a 300</div></div><div><div class="npcdbc-price">R$ 150</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
         </div>
       </div>
 
-      <div class="section-title" style="margin-top:2.5rem;">💎 CustomForms [DBCADDITIONS / NPCDBC]</div>
-      <p style="color:var(--muted);font-family:'Rajdhani',sans-serif;font-size:0.9rem;margin-bottom:1rem;">Formas customizadas com foco em qualidade, organização e compatibilidade total.</p>
-      <div class="npcdbc-grid">
-        <div class="npcdbc-card" data-src="custom" onclick="openProductPage('npcdbc-50')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 1–50</div><div class="npcdbc-range">Formas de 1 a 50</div></div><div><div class="npcdbc-price">R$ 25</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
-        <div class="npcdbc-card" data-src="custom" onclick="openProductPage('npcdbc-100')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 51–100</div><div class="npcdbc-range">Formas de 51 a 100</div></div><div><div class="npcdbc-price">R$ 50</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
-        <div class="npcdbc-card" data-src="custom" onclick="openProductPage('npcdbc-150')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 101–150</div><div class="npcdbc-range">Formas de 101 a 150</div></div><div><div class="npcdbc-price">R$ 75</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
-        <div class="npcdbc-card" data-src="custom" onclick="openProductPage('npcdbc-200')"><div class="npcdbc-icon">💎</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 151–200</div><div class="npcdbc-range">Formas de 151 a 200</div></div><div><div class="npcdbc-price">R$ 100</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
-        <div class="npcdbc-card" data-src="custom" onclick="openProductPage('npcdbc-300')"><div class="npcdbc-icon">👑</div><div class="npcdbc-info"><div class="npcdbc-name">NPCDBC | 201–300</div><div class="npcdbc-range">Formas de 201 a 300</div></div><div><div class="npcdbc-price">R$ 150</div><div class="npcdbc-stock">● Estoque: ∞</div></div></div>
-      </div>
-
-      <div class="section-title" style="margin-top:2.5rem;" data-src="scripts">🔌 Scripts / Plugins DBV</div>
-      <div class="products-grid" data-src="scripts">
-        <div class="product-card" data-src="scripts" onclick="openProductPage('dbv-plugin-core')">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0a0a20,#151530)">
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:5rem;opacity:0.2">🔌</div>
-          </div>
-          <div class="card-tag">Plugin</div>
-          <div class="card-body">
-            <div class="card-title">Plugin DBV — Core Setup</div>
-            <div class="card-desc">Configuração completa do Dragon Block Venus no seu servidor. Raças, transformações e poderes prontos para uso imediato.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>⚡</span> Entrega rápida</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>90</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('dbv-plugin-core')">Ver Produto →</button>
-          </div>
-        </div>
-        <div class="product-card" data-src="scripts" onclick="openProductPage('dbv-script-tecnicas')">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0a0a20,#151530)">
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:5rem;opacity:0.2">📜</div>
-          </div>
-          <div class="card-tag">Script</div>
-          <div class="card-body">
-            <div class="card-title">Script de Técnicas DBV</div>
-            <div class="card-desc">Pack de técnicas exclusivas para o Dragon Block Venus com mais de 60 habilidades únicas e configuráveis.</div>
-            <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div><div class="meta-item"><span>📅</span> Até 7 dias</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>70</span></div>
-            <button class="add-btn" onclick="event.stopPropagation(); openProductPage('dbv-script-tecnicas')">Ver Produto →</button>
-          </div>
+      <!-- ══ SCRIPTS / PLUGINS ══ -->
+      <div class="source-sub" data-sub="scripts">
+        <div class="section-title">🔌 Scripts / Plugins</div>
+        <div class="products-grid">
+          <div class="product-card" onclick="openProductPage('dbv-plugin-core')"><div class="card-banner" style="background:linear-gradient(135deg,#0a0a20,#151530)"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:5rem;opacity:0.2">🔌</div></div><div class="card-tag">Plugin</div><div class="card-body"><div class="card-title">Plugin DBV — Core Setup</div><div class="card-desc">Configuração completa do Dragon Block Venus no seu servidor. Raças, transformações e poderes prontos.</div><div class="card-meta"><div class="meta-item"><span>⚡</span> Entrega rápida</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>90</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('dbv-plugin-core')">Ver Produto →</button></div></div>
+          <div class="product-card" onclick="openProductPage('dbv-script-tecnicas')"><div class="card-banner" style="background:linear-gradient(135deg,#0a0a20,#151530)"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:5rem;opacity:0.2">📜</div></div><div class="card-tag">Script</div><div class="card-body"><div class="card-title">Script de Técnicas DBV</div><div class="card-desc">Pack de técnicas exclusivas com mais de 60 habilidades únicas e configuráveis.</div><div class="card-meta"><div class="meta-item"><span>📅</span> Até 7 dias</div></div></div><div class="card-footer"><div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>70</span></div><button class="add-btn" onclick="event.stopPropagation();openProductPage('dbv-script-tecnicas')">Ver Produto →</button></div></div>
         </div>
       </div>
-    </div><!-- /dbc-all -->
 
-  </div><!-- /panel-dbc -->
+      <!-- Firebase products inject here -->
+      <div class="source-sub" data-sub="firebase" id="source-fb-sub" style="display:none;"></div>
+
+    </div><!-- /source-all -->
+
+  </div><!-- /panel-source -->
+
+  <!-- ============================== -->
+  <!-- PANEL: DOWNLOADS -->
+  <!-- ============================== -->
+  <div id="panel-download" class="cat-panel">
+
+    <!-- Source sub-tabs -->
+    <div class="source-tabs">
+      <button class="source-tab active" onclick="switchSource('download', 'all', this)">Todos</button>
+      <button class="source-tab" onclick="switchSource('download', 'launcher', this)">🚀 Launcher</button>
+      <button class="source-tab" onclick="switchSource('download', 'modpack', this)">📦 Modpacks</button>
+      <button class="source-tab" onclick="switchSource('download', 'textura', this)">🎨 Texturas</button>
+    </div>
+
+    <div class="source-panel active" id="download-all">
+
+      <div class="dl-empty-state" id="dlEmptyState" style="text-align:center;padding:4rem 2rem;color:var(--muted);">
+        <div style="font-size:3rem;margin-bottom:1rem;opacity:0.3;">⬇️</div>
+        <div style="font-family:'Bebas Neue',cursive;font-size:1.4rem;letter-spacing:3px;margin-bottom:0.5rem;">Links em breve</div>
+        <div style="font-family:'Rajdhani',sans-serif;font-size:0.88rem;letter-spacing:1px;">Os links de download serão adicionados pelo admin.</div>
+      </div>
+      <!-- Download cards injected dynamically by admin panel -->
+      <div id="dl-cards-launcher" class="dl-section" style="display:none;">
+        <div class="section-title">🚀 Launcher</div>
+        <div class="products-grid" id="dl-grid-launcher"></div>
+      </div>
+      <div id="dl-cards-modpack" class="dl-section" style="display:none;">
+        <div class="section-title" style="margin-top:2rem;">📦 Modpacks</div>
+        <div class="products-grid" id="dl-grid-modpack"></div>
+      </div>
+      <div id="dl-cards-textura" class="dl-section" style="display:none;">
+        <div class="section-title" style="margin-top:2rem;">🎨 Texturas</div>
+        <div class="products-grid" id="dl-grid-textura"></div>
+      </div>
+
+    </div><!-- /download-all -->
+  </div><!-- /panel-download -->
 
   <!-- ============================== -->
   <!-- PANEL: 7DS (Nanatsu no Taizai) -->
@@ -1006,74 +1392,42 @@
 
     <div class="source-panel active" id="7ds-all">
 
-      <div class="section-title">⚔️ Produtos Nanatsu no Taizai</div>
-      <div class="products-grid">
+      <!--
+      ================================================================
+        OI LOIS hehe — bota os produtos aqui em baixo!
 
-        <div class="product-card soon-card" data-src="saga">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0f0f1e,#1e1e35)">
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.15">⚔️</div>
-          </div>
-          <div class="card-tag soon-tag">Em Breve</div>
-          <div class="card-body">
-            <div class="card-title" style="color:var(--muted)">Saga Nanatsu — A definir</div>
-            <div class="card-desc">Produto a ser definido. Entre em contato pelo Discord para mais informações.</div>
-            <div class="card-meta"><div class="meta-item"><span>💬</span> Consulte no Discord</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value" style="font-size:1.1rem;color:var(--muted)">A definir</span></div>
-            <button class="add-btn soon-btn" disabled>Em breve</button>
-          </div>
-        </div>
+        Usa o mesmo modelo que tá na categoria Dragon Block C (panel-source).
+        Cada produto é um <div class="product-card"> com:
+          - data-src="saga"  ← ou "plugin", "scripts", "custom"
+          - onclick="openProductPage('ID_DO_PRODUTO')"
+          E no PRODUCTS_DATA lá em baixo no JS, adiciona o objeto:
+            'ID_DO_PRODUTO': { name, subtitle, price, cartName, desc, features, includes, ... }
 
-        <div class="product-card soon-card" data-src="custom">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0f0f1e,#1e1e35)">
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.15">💎</div>
+        Exemplo de card:
+          <div class="product-card" data-src="saga" onclick="openProductPage('7ds-meu-produto')">
+            <div class="card-banner" style="background:linear-gradient(135deg,#2a0f00,#5a1e00)">
+              <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.2">⚔️</div>
+            </div>
+            <div class="card-body">
+              <div class="card-title">Nome do produto</div>
+              <div class="card-desc">Descrição curta.</div>
+              <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div></div>
+            </div>
+            <div class="card-footer">
+              <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>XX</span></div>
+              <button class="add-btn" onclick="event.stopPropagation(); openProductPage('7ds-meu-produto')">Ver Produto →</button>
+            </div>
           </div>
-          <div class="card-tag soon-tag">Em Breve</div>
-          <div class="card-body">
-            <div class="card-title" style="color:var(--muted)">Custom Forms Nanatsu — A definir</div>
-            <div class="card-desc">Produto a ser definido. Entre em contato pelo Discord para mais informações.</div>
-            <div class="card-meta"><div class="meta-item"><span>💬</span> Consulte no Discord</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value" style="font-size:1.1rem;color:var(--muted)">A definir</span></div>
-            <button class="add-btn soon-btn" disabled>Em breve</button>
-          </div>
-        </div>
 
-        <div class="product-card soon-card" data-src="plugin">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0f0f1e,#1e1e35)">
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.15">🔌</div>
-          </div>
-          <div class="card-tag soon-tag">Em Breve</div>
-          <div class="card-body">
-            <div class="card-title" style="color:var(--muted)">Plugin Nanatsu — A definir</div>
-            <div class="card-desc">Produto a ser definido. Entre em contato pelo Discord para mais informações.</div>
-            <div class="card-meta"><div class="meta-item"><span>💬</span> Consulte no Discord</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value" style="font-size:1.1rem;color:var(--muted)">A definir</span></div>
-            <button class="add-btn soon-btn" disabled>Em breve</button>
-          </div>
-        </div>
+        Categorias de sub-filtro disponíveis: saga | plugin | scripts | custom
+      ================================================================
+      -->
 
-        <div class="product-card soon-card" data-src="scripts">
-          <div class="card-banner" style="background:linear-gradient(135deg,#0f0f1e,#1e1e35)">
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.15">📜</div>
-          </div>
-          <div class="card-tag soon-tag">Em Breve</div>
-          <div class="card-body">
-            <div class="card-title" style="color:var(--muted)">Script Nanatsu — A definir</div>
-            <div class="card-desc">Produto a ser definido. Entre em contato pelo Discord para mais informações.</div>
-            <div class="card-meta"><div class="meta-item"><span>💬</span> Consulte no Discord</div></div>
-          </div>
-          <div class="card-footer">
-            <div class="card-price"><span class="price-label">Preço</span><span class="price-value" style="font-size:1.1rem;color:var(--muted)">A definir</span></div>
-            <button class="add-btn soon-btn" disabled>Em breve</button>
-          </div>
-        </div>
-
+      <div class="section-title">⚔️ Nanatsu no Taizai — Produtos</div>
+      <div class="products-grid" id="7ds-products-grid">
+        <!-- PRODUTOS AQUI -->
       </div>
+
     </div><!-- /7ds-all -->
 
   </div><!-- /panel-7ds -->
@@ -1084,7 +1438,7 @@
 
 <footer>
   <div class="footer-brand">Venus Store</div>
-  <p style="font-size:0.8rem;margin-bottom:0.4rem;">Dragon Block Venus • Nanatsu • Sagas • Texturas • Custom Forms • Técnicas</p>
+  <p style="font-size:0.8rem;margin-bottom:0.4rem;">Dragon Block C • Downloads • Nanatsu no Taizai</p>
   <div class="footer-divider"></div>
   <p>© 2026 <span>Venus Network</span> — Todos os direitos reservados</p>
   <p style="margin-top:5px;font-size:0.75rem;opacity:0.6;">Site desenvolvido por <span>Mikey</span> · Entrega via Discord DM</p>
@@ -1102,8 +1456,13 @@
   <header>
     <div class="logo" onclick="goToStore()">
       <div class="logo-icon"><img src="https://cdn.discordapp.com/icons/1264342364563177622/ad9d21c5055e71f9c286b1efe1375fda.png" width="50" height="50" alt="Venus Store Logo"></div>
-      <div><div class="logo-text">Venus Store</div><div class="logo-sub">Dragon Block Venus</div></div>
+      <div><div class="logo-text">Venus Store</div><div class="logo-sub">Dragon Block C</div></div>
     </div>
+    <nav class="header-cats">
+      <button class="h-cat-tab" onclick="goToStore('source')">🐉 Dragon Block C</button>
+      <button class="h-cat-tab" onclick="goToStore('7ds')">⚔️ Nanatsu no Taizai</button>
+      <button class="h-cat-tab" onclick="goToStore('download')">⬇️ Downloads</button>
+    </nav>
     <div class="header-right">
       <button class="admin-btn" id="adminHeaderBtn2" onclick="handleAdminBtn()">⚙ Admin</button>
       <button class="cart-btn" onclick="openCart()">🛒 Carrinho<span class="cart-count" id="cartCount2">0</span></button>
@@ -1117,55 +1476,28 @@
   <div class="pp-container">
     <div class="pp-left">
 
-      <!-- Hero Banner -->
-      <div class="pp-hero-banner" id="ppHeroBanner">
-        <div class="pp-hero-bg-el" id="ppHeroBg"></div>
-        <div class="pp-hero-glow-el" id="ppHeroGlow"></div>
-        <div class="pp-hero-content">
-          <span class="pp-hero-emoji" id="ppEmoji"></span>
-          <div class="pp-hero-tag" id="ppTag"></div>
-        </div>
+      <!-- Media Carousel -->
+      <div class="pp-carousel" id="ppCarousel">
+        <div class="pp-carousel-track" id="ppCarouselTrack"></div>
+        <button class="pp-carousel-arrow pp-carousel-prev" onclick="carouselNav(-1)">&#8592;</button>
+        <button class="pp-carousel-arrow pp-carousel-next" onclick="carouselNav(1)">&#8594;</button>
+        <div class="pp-carousel-dots" id="ppCarouselDots"></div>
       </div>
 
       <div class="pp-title" id="ppTitle"></div>
       <div class="pp-subtitle" id="ppSubtitle"></div>
 
       <!-- ===== ADMIN MEDIA PANEL ===== -->
-      <div class="pp-admin-panel" id="ppAdminPanel">
-        <div class="pp-admin-title">⚙ Admin — Mídia do Produto</div>
-
-        <!-- Video -->
-        <div class="pp-admin-section-label">▶ Vídeo YouTube</div>
-        <div class="pp-admin-row">
-          <input class="pp-admin-input" id="ppVideoInput" placeholder="ID do YouTube (ex: dQw4w9WgXcQ)" />
-          <button class="pp-admin-save" id="ppVideoSaveBtn" onclick="saveProductVideo()">💾 Salvar</button>
-        </div>
-        <div class="pp-admin-hint">Cole só o ID do vídeo — parte após ?v= na URL do YouTube</div>
-
-        <!-- Divider -->
-        <div class="pp-admin-divider"></div>
-
-        <!-- Photos -->
-        <div class="pp-admin-section-label">🖼️ Fotos do Produto</div>
-        <div class="pp-admin-hint">URLs de imagens (uma por linha). Serão exibidas como galeria no produto.</div>
-        <textarea class="pp-admin-textarea" id="ppPhotosInput" placeholder="https://cdn.discordapp.com/...&#10;https://i.imgur.com/...&#10;(uma URL por linha)"></textarea>
-        <button class="pp-admin-save" id="ppPhotosSaveBtn" onclick="saveProductPhotos()">💾 Salvar Fotos</button>
-
-        <!-- Current photos preview -->
-        <div id="ppAdminPhotoPreview" class="pp-admin-photo-preview"></div>
+      <!-- admin panel removed — manage media via Admin dashboard -->
+      <div id="ppDownloadLinkSection" style="display:none;">
+        <input id="ppDownloadLinkInput" style="display:none;">
+      </div>
+      <div style="display:none;">
+        <input id="ppVideoInput"><textarea id="ppPhotosInput"></textarea>
+        <div id="ppAdminPhotoPreview"></div>
       </div>
 
-      <!-- ===== VIDEO SECTION ===== -->
-      <div class="pp-video-section" id="ppVideoSection" style="display:none;">
-        <div class="pp-video-label">▶ Vídeo Apresentativo</div>
-        <div id="ppVideoContainer"></div>
-      </div>
-
-      <!-- ===== PHOTO GALLERY ===== -->
-      <div class="pp-gallery-section" id="ppGallerySection" style="display:none;">
-        <div class="pp-video-label">🖼️ Fotos do Produto</div>
-        <div class="pp-gallery-grid" id="ppGalleryGrid"></div>
-      </div>
+      <div id="ppGallerySection" style="display:none;"><div id="ppGalleryGrid"></div></div>
 
       <div class="pp-section-label">Sobre o produto</div>
       <div class="pp-desc" id="ppDesc"></div>
@@ -1177,6 +1509,8 @@
         <div class="pp-includes-title">◆ O que está incluído</div>
         <div class="pp-includes-list" id="ppIncludes"></div>
       </div>
+
+      <div id="ppVideoSection" style="display:none;"><div id="ppVideoContainer"></div></div>
 
     </div>
 
@@ -1287,6 +1621,273 @@
 </div>
 
 <div class="toast-container" id="toastContainer"></div>
+
+
+<!-- ============================================================ -->
+<!-- ADMIN DASHBOARD -->
+<!-- ============================================================ -->
+<div class="admin-dash-overlay" id="adminDash" onclick="handleAdminOverlayClick(event)">
+  <div class="admin-dash">
+
+    <!-- TOPBAR -->
+    <div class="adm-topbar">
+      <div class="adm-topbar-left">
+        <div class="adm-topbar-icon">⚙</div>
+        <div>
+          <div class="adm-topbar-title">Painel Admin</div>
+          <div class="adm-topbar-sub">Venus Store</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="adm-logout-btn" onclick="doAdminLogout()">↩ Sair</button>
+        <button class="adm-close-btn" onclick="closeAdminDash()">✕</button>
+      </div>
+    </div>
+
+    <!-- SIDEBAR -->
+    <div class="adm-sidebar">
+      <div class="adm-nav-group-label">Catálogo</div>
+      <button class="adm-nav-btn active" data-tab="products" onclick="adminSwitchTab('products',this)">
+        <span class="adm-nav-icon">📦</span> Produtos
+        <span class="adm-nav-badge" id="adm-badge-prods">0</span>
+      </button>
+      <button class="adm-nav-btn" onclick="adminSwitchTab('form',this)" id="adm-nav-form" style="display:none;">
+        <span class="adm-nav-icon">✏️</span> <span id="adm-nav-form-label">Novo Produto</span>
+      </button>
+
+      <div class="adm-sidebar-sep"></div>
+      <div class="adm-nav-group-label">Conteúdo</div>
+      <button class="adm-nav-btn" data-tab="media" onclick="adminSwitchTab('media',this)">
+        <span class="adm-nav-icon">🖼️</span> Mídia
+      </button>
+      <button class="adm-nav-btn" data-tab="links" onclick="adminSwitchTab('links',this)">
+        <span class="adm-nav-icon">🔗</span> Downloads
+      </button>
+
+      <div class="adm-sidebar-sep"></div>
+      <div class="adm-nav-group-label">Sistema</div>
+      <button class="adm-nav-btn" data-tab="roles" onclick="adminSwitchTab('roles',this)">
+        <span class="adm-nav-icon">🛡️</span> Cargos
+      </button>
+    </div>
+
+    <!-- CONTENT -->
+    <div class="adm-content">
+
+      <!-- ── TAB: LISTA DE PRODUTOS ── -->
+      <div class="admin-tab-panel active" id="admin-tab-products">
+        <div class="adm-section-head">
+          <div>
+            <div class="adm-section-title">Produtos</div>
+            <div class="adm-section-sub">Gerencie os produtos visíveis na loja</div>
+          </div>
+          <button class="adm-new-btn" onclick="adminNewProduct()">＋ Novo Produto</button>
+        </div>
+        <div class="adm-prod-list" id="adminProdList">
+          <div class="adm-empty"><div class="adm-empty-icon">📦</div><div class="adm-empty-text">Carregando produtos...</div></div>
+        </div>
+      </div>
+
+      <!-- ── TAB: FORMULÁRIO PRODUTO ── -->
+      <div class="admin-tab-panel" id="admin-tab-form">
+        <div class="adm-form-header">
+          <div class="adm-form-header-icon" id="adminFormIcon">➕</div>
+          <div>
+            <div class="adm-form-header-title" id="adminFormTitle">Novo Produto</div>
+            <div class="adm-form-header-sub" id="adminFormSub">Preencha os campos abaixo</div>
+          </div>
+        </div>
+
+        <div class="adm-form-grid">
+          <div class="afl adm-form-full">
+            <label>ID único <span style="color:rgba(136,120,170,0.6);font-weight:400;text-transform:none;letter-spacing:0;">— sem espaços (ex: saga-custom-100)</span></label>
+            <input id="af-id" placeholder="saga-custom-100" oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9-_]/g,'')">
+          </div>
+
+          <div class="afl">
+            <label>Categoria</label>
+            <select id="af-cat">
+              <option value="source">🐉 Dragon Block C</option>
+              <option value="7ds">⚔️ Nanatsu no Taizai</option>
+            </select>
+          </div>
+          <div class="afl">
+            <label>Sub-categoria</label>
+            <select id="af-src">
+              <option value="saga">⚔️ Saga</option>
+              <option value="textura">🎨 Textura</option>
+              <option value="tecnicas">⚡ Técnicas</option>
+              <option value="custom">💎 Custom Forms</option>
+              <option value="scripts">🔌 Scripts / Plugins</option>
+            </select>
+          </div>
+
+          <div class="afl adm-form-full">
+            <label>Nome do produto</label>
+            <input id="af-name" placeholder="Ex: Saga Customizada — 1 a 100 Missões">
+          </div>
+          <div class="afl adm-form-full">
+            <label>Subtítulo</label>
+            <input id="af-subtitle" placeholder="Ex: Saga Custom • Você escolhe o tema">
+          </div>
+
+          <div class="afl">
+            <label>Preço (R$)</label>
+            <input id="af-price" type="number" placeholder="25" min="0">
+          </div>
+          <div class="afl">
+            <label>Emoji / Ícone</label>
+            <input id="af-emoji" placeholder="🐉" maxlength="4">
+          </div>
+          <div class="afl">
+            <label>Tag do card <span style="color:rgba(136,120,170,0.6);font-weight:400;text-transform:none;">opcional</span></label>
+            <input id="af-tag" placeholder="Novo / Premium / Bestseller">
+          </div>
+          <div class="afl">
+            <label>Nota de entrega</label>
+            <input id="af-pricenote" placeholder="Entrega em até 14 dias">
+          </div>
+
+          <div class="afl adm-form-full">
+            <label>URL do banner <span style="color:rgba(136,120,170,0.6);font-weight:400;text-transform:none;">opcional</span></label>
+            <input id="af-heroimg" placeholder="https://cdn.discordapp.com/...">
+          </div>
+          <div class="afl adm-form-full">
+            <label>Descrição</label>
+            <textarea id="af-desc" placeholder="Descreva o produto em detalhes..." style="min-height:90px;"></textarea>
+          </div>
+          <div class="afl adm-form-full">
+            <label>O que está incluído <span style="color:rgba(136,120,170,0.6);font-weight:400;text-transform:none;">uma linha por item</span></label>
+            <textarea id="af-includes" placeholder="Tema escolhido por você&#10;Entrega via Discord DM&#10;Suporte pós-venda"></textarea>
+          </div>
+          <div class="afl adm-form-full">
+            <label>Especificações <span style="color:rgba(136,120,170,0.6);font-weight:400;text-transform:none;">emoji / label / valor</span></label>
+            <div class="admin-feat-rows" id="adminFeatRows"></div>
+            <button class="admin-add-feat-btn" onclick="adminAddFeat()">＋ Adicionar especificação</button>
+          </div>
+        </div>
+
+        <div class="adm-form-actions">
+          <button class="admin-save-btn" onclick="adminSaveProduct()">💾 SALVAR PRODUTO</button>
+          <button class="admin-cancel-form-btn" onclick="adminCancelForm()">← Voltar</button>
+        </div>
+      </div>
+
+      <!-- ── TAB: MÍDIA ── -->
+      <div class="admin-tab-panel" id="admin-tab-media">
+        <div class="adm-section-head">
+          <div>
+            <div class="adm-section-title">Mídia</div>
+            <div class="adm-section-sub">Vídeo YouTube e fotos adicionais por produto</div>
+          </div>
+        </div>
+
+        <div class="adm-media-select-wrap afl">
+          <label>Selecione o produto</label>
+          <select id="adminMediaSelect" onchange="adminLoadMediaForm()">
+            <option value="">— Selecione um produto —</option>
+          </select>
+        </div>
+
+        <div id="adminMediaForm" style="display:none;">
+          <div class="adm-media-card">
+            <div class="adm-media-card-title">🖼️ Banner do Produto</div>
+            <div style="font-size:0.72rem;color:var(--muted);font-family:'Rajdhani',sans-serif;margin-bottom:8px;letter-spacing:0.5px;">
+              Aparece no card da loja e no início do carrossel da página do produto.
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input class="adm-link-input" id="adminMediaBanner" placeholder="https://cdn.discordapp.com/... (URL da imagem)" style="flex:1;">
+              <button class="adm-media-save-btn" onclick="adminSaveMedia('banner')">💾 Salvar</button>
+            </div>
+            <div id="adminMediaBannerPreview" style="margin-top:10px;display:none;">
+              <img id="adminMediaBannerImg" style="width:100%;max-height:140px;object-fit:cover;border-radius:10px;border:1px solid var(--border);">
+            </div>
+          </div>
+          <div class="adm-media-card">
+            <div class="adm-media-card-title">▶ Vídeo YouTube</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input class="adm-link-input" id="adminMediaVideo" placeholder="Cole a URL do YouTube (ex: https://youtu.be/abc123)" style="flex:1;">
+              <button class="adm-media-save-btn" onclick="adminSaveMedia('video')">💾 Salvar</button>
+            </div>
+            <div style="font-size:0.72rem;color:var(--muted);font-family:'Rajdhani',sans-serif;margin-top:6px;letter-spacing:0.5px;">
+              Cole a URL completa do YouTube. O ID é extraído automaticamente.
+            </div>
+          </div>
+
+          <div class="adm-media-card">
+            <div class="adm-media-card-title">🖼️ Fotos do Produto</div>
+            <div style="font-size:0.72rem;color:var(--muted);font-family:'Rajdhani',sans-serif;margin-bottom:6px;letter-spacing:0.5px;">
+              Aparecem no carrossel da página do produto (após o banner e o vídeo).
+            </div>
+            <textarea class="adm-link-input" id="adminMediaPhotos" placeholder="https://cdn.discordapp.com/...&#10;https://i.imgur.com/...&#10;(uma URL por linha)" style="min-height:110px;resize:vertical;display:block;width:100%;"></textarea>
+            <button class="adm-media-save-btn" style="margin-top:8px;" onclick="adminSaveMedia('photos')">💾 Salvar Fotos</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── TAB: DOWNLOADS ── -->
+      <div class="admin-tab-panel" id="admin-tab-links">
+        <div class="adm-section-head">
+          <div>
+            <div class="adm-section-title">Downloads</div>
+            <div class="adm-section-sub">Links para launcher, modpacks e texturas</div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;" id="adminLinksList"></div>
+        <button class="adm-save-links-btn" onclick="adminSaveAllLinks()">💾 SALVAR TODOS OS LINKS</button>
+      </div>
+
+      <!-- ── TAB: CARGOS ── -->
+      <div class="admin-tab-panel" id="admin-tab-roles">
+        <div class="adm-section-head">
+          <div>
+            <div class="adm-section-title">Cargos</div>
+            <div class="adm-section-sub">Gerencie permissões dos admins</div>
+          </div>
+        </div>
+
+        <!-- Info box -->
+        <div style="background:rgba(138,43,226,0.07);border:1px solid rgba(138,43,226,0.2);border-radius:12px;padding:1rem 1.2rem;margin-bottom:1.4rem;">
+          <div style="font-family:'Rajdhani',sans-serif;font-weight:700;font-size:0.75rem;letter-spacing:2px;color:var(--accent2);margin-bottom:0.5rem;">🛡️ SISTEMA DE CARGOS</div>
+          <div style="font-size:0.82rem;color:var(--muted);font-family:'Rajdhani',sans-serif;line-height:1.7;">
+            Contas sem cargo têm acesso total (conta raiz). Contas com cargo só acessam o que foi liberado. Para adicionar um admin: cadastre o e-mail no Firebase Auth, depois defina o cargo aqui com o UID.
+          </div>
+        </div>
+
+        <!-- Add/Edit role form -->
+        <div style="background:rgba(255,255,255,0.025);border:1px solid rgba(138,43,226,0.15);border-radius:14px;padding:1.2rem;margin-bottom:1.2rem;">
+          <div style="font-family:'Rajdhani',sans-serif;font-weight:700;font-size:0.75rem;letter-spacing:2px;color:var(--accent2);margin-bottom:1rem;">➕ DEFINIR CARGO</div>
+          <div class="afl" style="display:flex;flex-direction:column;gap:0.7rem;">
+            <div>
+              <label>UID do usuário (Firebase Auth)</label>
+              <input id="roleUidInput" placeholder="Ex: abc123xyz..." style="font-family:'JetBrains Mono',monospace;font-size:0.8rem;">
+            </div>
+            <div>
+              <label>Nome do cargo (para identificação)</label>
+              <input id="roleNameInput" placeholder="Ex: Editor de Mídia, Gerente de Produtos...">
+            </div>
+          </div>
+          <div style="margin:1rem 0 0.6rem;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:0.72rem;letter-spacing:2px;color:var(--muted);text-transform:uppercase;">Permissões</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem;" id="rolePermsGrid">
+            <label class="role-perm-row"><input type="checkbox" id="perm_manage_products"> <span>📦 Criar / Editar Produtos</span></label>
+            <label class="role-perm-row"><input type="checkbox" id="perm_manage_media"> <span>🖼️ Gerenciar Mídia (fotos/vídeos)</span></label>
+            <label class="role-perm-row"><input type="checkbox" id="perm_manage_links"> <span>🔗 Gerenciar Links de Download</span></label>
+            <label class="role-perm-row"><input type="checkbox" id="perm_manage_roles"> <span>🛡️ Gerenciar Cargos (CUIDADO)</span></label>
+          </div>
+          <button class="admin-save-btn" style="margin-top:1rem;width:100%;" onclick="adminSaveRole()">💾 SALVAR CARGO</button>
+          <div id="roleFormMsg" style="margin-top:0.6rem;font-family:'Rajdhani',sans-serif;font-size:0.82rem;min-height:1.2em;"></div>
+        </div>
+
+        <!-- Roles list -->
+        <div style="font-family:'Rajdhani',sans-serif;font-weight:700;font-size:0.75rem;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:0.7rem;">Cargos Cadastrados</div>
+        <div id="rolesList" style="display:flex;flex-direction:column;gap:8px;">
+          <div style="color:var(--muted);font-family:'Rajdhani',sans-serif;font-size:0.85rem;">Carregando...</div>
+        </div>
+      </div>
+
+    </div><!-- /adm-content -->
+  </div>
+</div>
 
 <!-- LIGHTBOX -->
 <div class="lightbox-overlay" id="lightbox" onclick="closeLightbox(event)">
@@ -1460,6 +2061,16 @@
       features: [{icon:'💎',label:'Formas',val:'201 a 300'},{icon:'⚡',label:'Entrega',val:'Rápida'},{icon:'🔧',label:'Compat.',val:'NPCDBC / DBC'},{icon:'📦',label:'Estoque',val:'Ilimitado'}],
       includes: ['Você pode escolher o estilo das formas','Suporte via Discord após entrega']
     },
+    // DOWNLOAD LINKS (admin seta via Firebase, chave = id do card)
+    'launcher-venus':    { name:'Launcher Venus', isDownload:true, cartName:'', price:0 },
+    'modpack-curseforge':{ name:'Modpack CurseForge', isDownload:true, cartName:'', price:0 },
+    'modpack-modrinth':  { name:'Modpack Modrinth', isDownload:true, cartName:'', price:0 },
+    'modpack-technic':   { name:'Modpack Technic', isDownload:true, cartName:'', price:0 },
+    'textura-curseforge':{ name:'Textura CurseForge', isDownload:true, cartName:'', price:0 },
+    'textura-mediafire': { name:'Textura Mediafire', isDownload:true, cartName:'', price:0 },
+    'textura-planetmc':  { name:'Textura Planet MC', isDownload:true, cartName:'', price:0 },
+    'textura-modrinth':  { name:'Textura Modrinth', isDownload:true, cartName:'', price:0 },
+
     // 7DS
     '7ds-saga-100': {
       name: 'Saga 7DS — 1 a 100 Missões', subtitle: 'Nanatsu no Taizai • Saga Customizada', tag: 'Novo', emoji: '⚔️',
@@ -1580,6 +2191,62 @@
   // Expose to Firebase module
   window.PRODUCTS_DATA = PRODUCTS_DATA;
 
+  // ===== DOWNLOAD LINKS =====
+  function openDownloadLink(id) {
+    // Get link from cached Firebase data
+    const media = window._pendingMedia && window._pendingMedia[id];
+    const link = media && (media.downloadUrl || media.youtubeId);
+    if (link && link.startsWith('http')) {
+      window.open(link, '_blank');
+    } else if (window._adminUser) {
+      toast('⚙ Admin: salva o link no campo "Link de Download" do painel.', '#9b30ff');
+    } else {
+      toast('🔗 Link em breve. Aguarde!', '#8878aa');
+    }
+  }
+
+  // ===== CARD HOVER SLIDESHOW =====
+  function initCardSlideshow(card, photos) {
+    if (!photos || photos.length < 2) return;
+    let idx = 0, timer = null;
+    // inject slide images
+    const banner = card.querySelector('.card-banner');
+    if (!banner) return;
+    photos.slice(1).forEach(url => {
+      const img = document.createElement('img');
+      img.className = 'slide-img'; img.src = url; img.alt = '';
+      banner.appendChild(img);
+    });
+    const slides = banner.querySelectorAll('.slide-img');
+    card.addEventListener('mouseenter', () => {
+      idx = 0;
+      timer = setInterval(() => {
+        slides.forEach(s => s.classList.remove('active'));
+        if (slides[idx]) slides[idx].classList.add('active');
+        idx = (idx + 1) % slides.length;
+      }, 900);
+    });
+    card.addEventListener('mouseleave', () => {
+      clearInterval(timer);
+      slides.forEach(s => s.classList.remove('active'));
+      idx = 0;
+    });
+  }
+
+  // Init slideshows when media loads
+  document.addEventListener('videosLoaded', () => {
+    document.querySelectorAll('.product-card').forEach(card => {
+      const onclick = card.getAttribute('onclick') || '';
+      const match = onclick.match(/openProductPage\(['"]([^'"]+)['"]/);
+      if (!match) return;
+      const id = match[1];
+      const media = window._pendingMedia && window._pendingMedia[id];
+      if (media && media.photos && media.photos.length > 1) {
+        initCardSlideshow(card, media.photos);
+      }
+    });
+  });
+
   // Apply pending videos when Firebase loads them
   document.addEventListener('videosLoaded', () => {
     if (window._pendingVideos && currentProductId) {
@@ -1603,40 +2270,29 @@
   // ===== CATEGORY / SOURCE SWITCHING =====
   function switchCategory(cat, btn) {
     document.querySelectorAll('.cat-panel').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.cat-tab').forEach(b => b.classList.remove('active'));
-    document.getElementById('panel-' + cat).classList.add('active');
-    btn.classList.add('active');
+    document.querySelectorAll('.h-cat-tab').forEach(b => b.classList.remove('active'));
+    const panel = document.getElementById('panel-' + cat);
+    if (panel) panel.classList.add('active');
+    if (btn) btn.classList.add('active');
   }
 
   function switchSource(cat, src, btn) {
     const panel = document.getElementById('panel-' + cat);
     if (!panel) return;
+    // Update tab buttons
     panel.querySelectorAll('.source-tab').forEach(b => b.classList.remove('active'));
-    panel.querySelectorAll('.source-panel').forEach(p => {
-      p.style.display = 'none'; p.classList.remove('active');
-    });
-    btn.classList.add('active');
-    // Show/hide cards based on source
+    if (btn) btn.classList.add('active');
+
     const allPanel = document.getElementById(cat + '-all');
     if (!allPanel) return;
+
     if (src === 'all') {
-      allPanel.style.display = 'block'; allPanel.classList.add('active');
-      allPanel.querySelectorAll('[data-src]').forEach(c => c.style.display = '');
-      allPanel.querySelectorAll('.section-title, .npcdbc-grid, p').forEach(e => e.style.display = '');
+      // Show all source-sub blocks
+      allPanel.querySelectorAll('[data-sub]').forEach(el => el.style.display = '');
     } else {
-      allPanel.style.display = 'block'; allPanel.classList.add('active');
-      // Hide all products then show matching ones
-      allPanel.querySelectorAll('[data-src]').forEach(c => {
-        c.style.display = c.getAttribute('data-src') === src ? '' : 'none';
-      });
-      // Show/hide section titles based on context
-      allPanel.querySelectorAll('.section-title').forEach(t => {
-        const nextGrid = t.nextElementSibling;
-        if (nextGrid) {
-          const visible = nextGrid.querySelectorAll('[data-src]:not([style*="none"])');
-          t.style.display = visible.length > 0 ? '' : 'none';
-          if (nextGrid.tagName !== 'P') nextGrid.style.display = visible.length > 0 ? '' : 'none';
-        }
+      // Show only the matching source-sub, hide everything else
+      allPanel.querySelectorAll('[data-sub]').forEach(el => {
+        el.style.display = el.dataset.sub === src ? '' : 'none';
       });
     }
   }
@@ -1648,31 +2304,21 @@
     currentProduct = p;
     currentProductId = id;
 
-    // Apply any cached video
+    // Apply any cached video/photos/banner
     if (window._pendingVideos && window._pendingVideos[id]) {
       p.youtubeId = window._pendingVideos[id];
     }
+    const _cm0 = window._pendingMedia && window._pendingMedia[id];
+    if (_cm0 && _cm0.heroImg) p.heroImg = _cm0.heroImg;
+    if (_cm0 && _cm0.photos)  p.photos  = _cm0.photos;
 
-    // Hero
-    const heroBg = document.getElementById('ppHeroBg');
-    const heroGlow = document.getElementById('ppHeroGlow');
-    const heroEmoji = document.getElementById('ppEmoji');
-    let heroImgEl = document.getElementById('ppHeroImg');
-    if (!heroImgEl) {
-      heroImgEl = document.createElement('img');
-      heroImgEl.id = 'ppHeroImg';
-      heroImgEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;';
-      document.getElementById('ppHeroBanner').insertBefore(heroImgEl, document.getElementById('ppHeroBanner').firstChild);
-    }
-    if (p.heroImg) {
-      heroImgEl.src = p.heroImg; heroImgEl.style.display = 'block';
-      heroBg.style.background = ''; heroGlow.style.background = ''; heroEmoji.style.display = 'none';
-    } else {
-      heroImgEl.style.display = 'none'; heroBg.style.background = p.heroBg;
-      heroGlow.style.background = p.heroGlow; heroEmoji.style.display = '';
-    }
-    heroEmoji.textContent = p.emoji || '';
-    document.getElementById('ppTag').textContent = p.tag || '';
+    // Build carousel: banner → fotos → vídeo por último
+    const _slides = [];
+    if (p.heroImg) _slides.push({ type: 'image', url: p.heroImg });
+    (p.photos || []).forEach(u => _slides.push({ type: 'image', url: u }));
+    if (p.youtubeId) _slides.push({ type: 'video', youtubeId: p.youtubeId });
+    if (_slides.length === 0) _slides.push({ type: 'placeholder', emoji: p.emoji || '📦', tag: p.tag || '' });
+    buildCarousel(_slides);
     document.getElementById('ppTitle').textContent = p.name;
     document.getElementById('ppSubtitle').textContent = p.subtitle;
     document.getElementById('ppDesc').textContent = p.desc;
@@ -1692,43 +2338,48 @@
     btn.textContent = '🛒 ADICIONAR AO CARRINHO';
     btn.classList.remove('added');
 
-    // Admin panel
-    const adminPanel = document.getElementById('ppAdminPanel');
-    adminPanel.classList.toggle('visible', !!window._adminUser);
-    document.getElementById('ppVideoInput').value = p.youtubeId || '';
-
-    // Load photos from cache
-    const cachedMedia = window._pendingMedia && window._pendingMedia[id];
-    if (cachedMedia && cachedMedia.photos) p.photos = cachedMedia.photos;
-    document.getElementById('ppPhotosInput').value = (p.photos || []).join('\n');
-    renderAdminPhotoPreview(p.photos || []);
-
-    // Video
-    if (p.youtubeId) {
-      renderProductVideo(p.youtubeId);
-    } else {
-      document.getElementById('ppVideoSection').style.display = 'none';
-      document.getElementById('ppVideoContainer').innerHTML = '';
-    }
-
-    // Gallery
-    renderProductGallery(p.photos || []);
+    // (admin media panel moved to Admin dashboard)
 
     history.pushState({ product: id }, '', '#produto-' + id);
     goToProduct();
   }
 
-  function renderProductVideo(youtubeId) {
-    const section = document.getElementById('ppVideoSection');
-    const container = document.getElementById('ppVideoContainer');
-    if (youtubeId) {
-      section.style.display = 'block';
-      container.innerHTML = `<div class="pp-video-wrap"><iframe src="https://www.youtube.com/embed/${youtubeId}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>`;
-    } else {
-      section.style.display = 'none';
-      container.innerHTML = '';
-    }
+  // ===== CAROUSEL ENGINE =====
+  let _carouselSlides = [], _carouselIdx = 0;
+
+  function buildCarousel(slides) {
+    _carouselSlides = slides; _carouselIdx = 0;
+    const track = document.getElementById('ppCarouselTrack');
+    const dots  = document.getElementById('ppCarouselDots');
+    if (!track) return;
+    track.innerHTML = slides.map((s, i) => {
+      if (s.type === 'image') {
+        return `<div class="pp-carousel-slide"><img src="${s.url}" alt="Mídia ${i+1}" loading="${i===0?'eager':'lazy'}"></div>`;
+      } else if (s.type === 'video') {
+        return `<div class="pp-carousel-slide slide-video"><iframe src="https://www.youtube.com/embed/${s.youtubeId}?rel=0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>`;
+      } else {
+        return `<div class="pp-carousel-slide"><span class="pp-carousel-emoji">${s.emoji}</span>${s.tag ? `<span class="pp-carousel-tag">${s.tag}</span>` : ''}</div>`;
+      }
+    }).join('');
+    if (dots) dots.innerHTML = slides.length > 1
+      ? slides.map((_, i) => `<button class="pp-carousel-dot${i===0?' active':''}" onclick="carouselGoTo(${i})"></button>`).join('')
+      : '';
+    // hide arrows if only 1 slide
+    document.querySelectorAll('.pp-carousel-arrow').forEach(a => a.classList.toggle('hidden', slides.length <= 1));
+    carouselGoTo(0);
   }
+
+  function carouselGoTo(idx) {
+    if (!_carouselSlides.length) return;
+    _carouselIdx = ((idx % _carouselSlides.length) + _carouselSlides.length) % _carouselSlides.length;
+    const track = document.getElementById('ppCarouselTrack');
+    if (track) track.style.transform = `translateX(-${_carouselIdx * 100}%)`;
+    document.querySelectorAll('.pp-carousel-dot').forEach((d, i) => d.classList.toggle('active', i === _carouselIdx));
+  }
+
+  function carouselNav(dir) { carouselGoTo(_carouselIdx + dir); }
+
+  function renderProductVideo(youtubeId) { /* carousel handles video */ }
 
   async function saveProductVideo() {
     if (!window._adminUser) { toast('⚠️ Faça login como admin primeiro.', '#ff1744'); return; }
@@ -1736,17 +2387,25 @@
     if (!currentProductId) return;
     const btn = document.getElementById('ppVideoSaveBtn');
     btn.textContent = '⏳...';
-    const ok = await window._saveMedia(currentProductId, input, undefined);
-    if (ok) {
+    const res = await window._saveMedia(currentProductId, input, undefined);
+    if (res.ok) {
       if (currentProduct) currentProduct.youtubeId = input;
       window._pendingVideos = window._pendingVideos || {};
       window._pendingVideos[currentProductId] = input;
-      renderProductVideo(input);
+      // Rebuild carousel
+      if (currentProduct) {
+        const sl = [];
+        if (currentProduct.heroImg) sl.push({ type: 'image', url: currentProduct.heroImg });
+        if (input) sl.push({ type: 'video', youtubeId: input });
+        (currentProduct.photos || []).forEach(u => sl.push({ type: 'image', url: u }));
+        if (!sl.length) sl.push({ type: 'placeholder', emoji: currentProduct.emoji || '📦', tag: currentProduct.tag || '' });
+        buildCarousel(sl);
+      }
       toast('✅ Vídeo salvo!', '#00e676');
       btn.textContent = '✅ Salvo!';
       setTimeout(() => btn.textContent = '💾 Salvar', 2000);
     } else {
-      toast('❌ Erro ao salvar. Firebase configurado?', '#ff1744');
+      toast('❌ ' + (res.err || 'Erro Firebase'), '#ff1744');
       btn.textContent = '💾 Salvar';
     }
   }
@@ -1758,19 +2417,27 @@
     const photos = raw.split('\n').map(s => s.trim()).filter(s => s.startsWith('http'));
     const btn = document.getElementById('ppPhotosSaveBtn');
     btn.textContent = '⏳...';
-    const ok = await window._saveMedia(currentProductId, undefined, photos);
-    if (ok) {
+    const res = await window._saveMedia(currentProductId, undefined, photos);
+    if (res.ok) {
       if (currentProduct) currentProduct.photos = photos;
       window._pendingMedia = window._pendingMedia || {};
       window._pendingMedia[currentProductId] = window._pendingMedia[currentProductId] || {};
       window._pendingMedia[currentProductId].photos = photos;
-      renderProductGallery(photos);
+      // Rebuild carousel
+      if (currentProduct) {
+        const sl = [];
+        if (currentProduct.heroImg) sl.push({ type: 'image', url: currentProduct.heroImg });
+        if (currentProduct.youtubeId) sl.push({ type: 'video', youtubeId: currentProduct.youtubeId });
+        photos.forEach(u => sl.push({ type: 'image', url: u }));
+        if (!sl.length) sl.push({ type: 'placeholder', emoji: currentProduct.emoji || '📦', tag: currentProduct.tag || '' });
+        buildCarousel(sl);
+      }
       renderAdminPhotoPreview(photos);
       toast('✅ Fotos salvas!', '#00e676');
       btn.textContent = '✅ Salvo!';
       setTimeout(() => btn.textContent = '💾 Salvar Fotos', 2000);
     } else {
-      toast('❌ Erro ao salvar. Firebase configurado?', '#ff1744');
+      toast('❌ ' + (res.err || 'Erro Firebase'), '#ff1744');
       btn.textContent = '💾 Salvar Fotos';
     }
   }
@@ -1796,6 +2463,26 @@
     ).join('');
   }
 
+  async function saveDownloadLink() {
+    if (!window._adminUser) { toast('⚠️ Faça login como admin primeiro.', '#ff1744'); return; }
+    if (!currentProductId) return;
+    const link = document.getElementById('ppDownloadLinkInput').value.trim();
+    const btn = document.getElementById('ppDownloadSaveBtn');
+    btn.textContent = '⏳...';
+    const res = await window._saveMedia(currentProductId, link, undefined);
+    if (res.ok) {
+      window._pendingMedia = window._pendingMedia || {};
+      window._pendingMedia[currentProductId] = window._pendingMedia[currentProductId] || {};
+      window._pendingMedia[currentProductId].downloadUrl = link;
+      toast('✅ Link salvo!', '#00e676');
+      btn.textContent = '✅ Salvo!';
+      setTimeout(() => btn.textContent = '💾 Salvar', 2000);
+    } else {
+      toast('❌ ' + (res.err || 'Erro Firebase'), '#ff1744');
+      btn.textContent = '💾 Salvar';
+    }
+  }
+
   // Lightbox
   let _lbIdx = 0, _lbPhotos = [];
   function openLightbox(idx) {
@@ -1813,10 +2500,664 @@
   // ===== ADMIN =====
   function handleAdminBtn() {
     if (window._adminUser) {
-      window._adminLogout();
-      toast('👋 Logout realizado.', '#8878aa');
+      openAdminDash();
     } else {
       openAdminModal();
+    }
+  }
+
+  // ── ADMIN DASHBOARD ──────────────────────────────────────
+  function openAdminDash() {
+    document.getElementById('adminDash').classList.add('open');
+
+    // Apply role-based tab visibility
+    const role = window._adminRole;
+    const isRoot = !role; // sem role = conta raiz, acesso total
+
+    const tabVisibility = {
+      'products':   isRoot || !!role?.manage_products,
+      'media':      isRoot || !!role?.manage_media,
+      'links':      isRoot || !!role?.manage_links,
+      'roles':      isRoot || !!role?.manage_roles,
+    };
+
+    document.querySelectorAll('.adm-nav-btn[data-tab]').forEach(btn => {
+      const tab = btn.dataset.tab;
+      btn.style.display = (tabVisibility[tab] !== false) ? '' : 'none';
+    });
+
+    // Switch to first visible tab
+    const firstVisible = Object.keys(tabVisibility).find(t => tabVisibility[t]);
+    adminSwitchTab(firstVisible || 'products');
+    adminRefreshProdList();
+    adminPopulateMediaSelect();
+    adminPopulateLinks();
+    adminRefreshRoles();
+  }
+  function closeAdminDash() { document.getElementById('adminDash').classList.remove('open'); }
+
+  function adminSwitchTab(tab, btn) {
+    document.querySelectorAll('.admin-tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.adm-nav-btn').forEach(b => b.classList.remove('active'));
+    const panel = document.getElementById('admin-tab-' + tab);
+    if (panel) panel.classList.add('active');
+    if (btn) btn.classList.add('active');
+    else {
+      document.querySelectorAll('.adm-nav-btn').forEach(b => {
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + tab + "'")) b.classList.add('active');
+      });
+    }
+    // Reset media form ao entrar na aba mídia
+    if (tab === 'media') {
+      const sel = document.getElementById('adminMediaSelect');
+      if (sel) sel.value = '';
+      const form = document.getElementById('adminMediaForm');
+      if (form) form.style.display = 'none';
+    }
+  }
+
+  function handleAdminOverlayClick(e) {
+    if (e.target === document.getElementById('adminDash')) closeAdminDash();
+  }
+
+  function doAdminLogout() {
+    window._adminLogout();
+    closeAdminDash();
+    toast('👋 Logout realizado.', '#8878aa');
+  }
+
+  // ── PRODUCT LIST ─────────────────────────────────────────
+  function getAllProducts() {
+    const all = {};
+    Object.entries(window.PRODUCTS_DATA || {}).forEach(([id, p]) => {
+      if (!p.isDownload) all[id] = { ...p, id, _static: !window._fbProducts?.[id] };
+    });
+    Object.entries(window._fbProducts || {}).forEach(([id, p]) => {
+      if (!p.isDownload) all[id] = { ...p, id, _firebase: true };
+    });
+    return all;
+  }
+
+  // Tracks which static product IDs are hidden
+  window._hiddenStatic = window._hiddenStatic || new Set();
+
+  async function adminHideStaticProduct(id) {
+    window._hiddenStatic.add(id);
+    // Save to Firebase so it persists
+    await window._saveMedia(id + '_hidden', 'true', undefined);
+    // Hide card in the DOM
+    const card = document.querySelector(`[onclick*="openProductPage('${id}')"]`);
+    if (card) card.style.display = 'none';
+    adminRefreshProdList();
+    toast('🚫 Produto ocultado da loja.', '#ff9800');
+  }
+
+  async function adminRestoreStaticProduct(id) {
+    window._hiddenStatic.delete(id);
+    await window._saveMedia(id + '_hidden', '', undefined);
+    const card = document.querySelector(`[onclick*="openProductPage('${id}')"]`);
+    if (card) card.style.display = '';
+    adminRefreshProdList();
+    toast('✅ Produto restaurado.', '#00e676');
+  }
+
+  // Load hidden static products on start
+  document.addEventListener('videosLoaded', () => {
+    Object.keys(window._pendingMedia || {}).forEach(key => {
+      if (key.endsWith('_hidden')) {
+        const id = key.replace('_hidden', '');
+        const val = window._pendingMedia[key]?.youtubeId;
+        if (val && val === 'true') {
+          window._hiddenStatic.add(id);
+          const card = document.querySelector(`[onclick*="openProductPage('${id}')"]`);
+          if (card) card.style.display = 'none';
+        }
+      }
+    });
+    adminRefreshProdList();
+  });
+
+  function adminRefreshProdList() {
+    const list = document.getElementById('adminProdList');
+    const prods = getAllProducts();
+    const entries = Object.values(prods).filter(p => !p.isDownload);
+    const badge = document.getElementById('adm-badge-prods');
+    if (badge) badge.textContent = entries.length;
+    if (!entries.length) {
+      list.innerHTML = `<div class="adm-empty"><div class="adm-empty-icon">📦</div><div class="adm-empty-text">Nenhum produto cadastrado ainda.<br>Clique em "+ Novo Produto" para começar.</div></div>`;
+      return;
+    }
+    const CAT_LABELS = { source: 'Dragon Block C', '7ds': 'Nanatsu' };
+    const SRC_LABELS = { saga:'Saga', textura:'Textura', tecnicas:'Técnicas', custom:'Custom Forms', scripts:'Scripts/Plugins' };
+    list.innerHTML = entries.map(p => {
+      const isFirebase = !!p._firebase;
+      const isHidden = window._hiddenStatic?.has(p.id);
+      return `<div class="adm-prod-card" style="${isHidden ? 'opacity:0.45;' : ''}">
+        <div class="adm-prod-emoji">${p.emoji || '📦'}</div>
+        <div class="adm-prod-info">
+          <div class="adm-prod-name">${p.name || p.id} ${isHidden ? '<span style="color:var(--red);font-size:0.7rem;font-family:Rajdhani,sans-serif;letter-spacing:1px;">● OCULTO</span>' : ''}</div>
+          <div class="adm-prod-chips">
+            <span class="adm-chip">${CAT_LABELS[p._cat || '_cat'] || 'DBC'}</span>
+            <span class="adm-chip">${SRC_LABELS[p._src || '_src'] || ''}</span>
+            <span class="adm-chip price">R$ ${p.price || 0}</span>
+          </div>
+        </div>
+        <div class="adm-prod-actions">
+          ${isFirebase
+            ? `<button class="adm-btn-edit" onclick="adminEditProduct('${p.id}')">✏</button>
+               <button class="adm-btn-del" onclick="adminDeleteProduct('${p.id}')">🗑</button>`
+            : isHidden
+              ? `<button class="adm-btn-edit" onclick="adminRestoreStaticProduct('${p.id}')" title="Restaurar produto na loja">↩ Restaurar</button>`
+              : `<button class="adm-btn-del" style="font-size:0.72rem;" onclick="adminHideStaticProduct('${p.id}')" title="Ocultar da loja">🚫 Ocultar</button>`
+          }
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // ── PRODUCT FORM ─────────────────────────────────────────
+  let _editingProductId = null;
+  let _adminFeatCount = 0;
+
+  function adminNewProduct() {
+    _editingProductId = null; _adminFeatCount = 0;
+    document.getElementById('adminFormTitle').textContent = 'Novo Produto';
+    document.getElementById('adminFormSub').textContent = 'Preencha os campos abaixo';
+    document.getElementById('adminFormIcon').textContent = '➕';
+    document.getElementById('adm-nav-form-label').textContent = 'Novo Produto';
+    document.getElementById('adm-nav-form').style.display = 'flex';
+    document.getElementById('af-id').disabled = false;
+    ['id','name','subtitle','price','emoji','tag','pricenote','heroimg','desc','includes'].forEach(f => {
+      const el = document.getElementById('af-' + f);
+      if (el) el.value = '';
+    });
+    document.getElementById('af-cat').value = 'source';
+    document.getElementById('af-src').value = 'saga';
+    document.getElementById('adminFeatRows').innerHTML = '';
+    adminAddFeat(); adminAddFeat(); adminAddFeat(); adminAddFeat();
+    adminSwitchTab('form', document.getElementById('adm-nav-form'));
+    document.querySelector('.adm-content').scrollTop = 0;
+  }
+
+  function adminEditProduct(id) {
+    const p = (window._fbProducts || {})[id] || (window.PRODUCTS_DATA || {})[id];
+    if (!p) return;
+    _editingProductId = id; _adminFeatCount = 0;
+    document.getElementById('adminFormTitle').textContent = '✏️ Editando: ' + (p.name || id);
+    document.getElementById('af-id').value = id;
+    document.getElementById('af-id').disabled = true;
+    document.getElementById('af-name').value = p.name || '';
+    document.getElementById('af-subtitle').value = p.subtitle || '';
+    document.getElementById('af-price').value = p.price || '';
+    document.getElementById('af-emoji').value = p.emoji || '';
+    document.getElementById('af-tag').value = p.tag || '';
+    document.getElementById('af-pricenote').value = p.priceNote || '';
+    document.getElementById('af-heroimg').value = p.heroImg || '';
+    document.getElementById('af-desc').value = p.desc || '';
+    document.getElementById('af-includes').value = (p.includes || []).join('\n');
+    document.getElementById('af-cat').value = p._cat || 'source';
+    document.getElementById('af-src').value = p._src || 'saga';
+    document.getElementById('adminFeatRows').innerHTML = '';
+    (p.features || []).forEach(f => adminAddFeat(f.icon, f.label, f.val));
+    if (!p.features || p.features.length < 2) { adminAddFeat(); adminAddFeat(); }
+    document.getElementById('adminFormTitle').textContent = 'Editando Produto';
+    document.getElementById('adminFormSub').textContent = p.name || id;
+    document.getElementById('adminFormIcon').textContent = '✏️';
+    document.getElementById('adm-nav-form-label').textContent = 'Editando';
+    document.getElementById('adm-nav-form').style.display = 'flex';
+    adminSwitchTab('form', document.getElementById('adm-nav-form'));
+    document.querySelector('.adm-content').scrollTop = 0;
+  }
+
+  function adminAddFeat(icon='', label='', val='') {
+    _adminFeatCount++;
+    const n = _adminFeatCount;
+    const row = document.createElement('div');
+    row.className = 'admin-feat-row'; row.id = 'feat-row-' + n;
+    row.innerHTML = `
+      <input style="width:52px;flex:none;" placeholder="⚡" id="feat-icon-${n}" value="${icon}">
+      <input placeholder="Label" id="feat-label-${n}" value="${label}">
+      <input placeholder="Valor" id="feat-val-${n}" value="${val}">
+      <button class="admin-feat-remove" onclick="document.getElementById('feat-row-${n}').remove()">✕</button>`;
+    document.getElementById('adminFeatRows').appendChild(row);
+  }
+
+  function adminCancelForm() {
+    document.getElementById('adm-nav-form').style.display = 'none';
+    _editingProductId = null;
+    adminSwitchTab('products');
+    document.querySelectorAll('.adm-nav-btn').forEach(b => {
+      if (b.getAttribute('onclick') && b.getAttribute('onclick').includes("'products'")) b.classList.add('active');
+    });
+  }
+
+  async function adminSaveProduct() {
+    const id = _editingProductId || document.getElementById('af-id').value.trim();
+    if (!id) { toast('⚠️ ID do produto é obrigatório!', '#ff1744'); return; }
+
+    const name = document.getElementById('af-name').value.trim();
+    const price = parseFloat(document.getElementById('af-price').value) || 0;
+    const cat = document.getElementById('af-cat').value;
+    const src = document.getElementById('af-src').value;
+
+    // Collect features
+    const features = [];
+    document.querySelectorAll('#adminFeatRows .admin-feat-row').forEach(row => {
+      const n = row.id.replace('feat-row-','');
+      const icon = document.getElementById('feat-icon-'+n)?.value.trim();
+      const label = document.getElementById('feat-label-'+n)?.value.trim();
+      const val = document.getElementById('feat-val-'+n)?.value.trim();
+      if (label && val) features.push({ icon: icon||'◆', label, val });
+    });
+
+    const includesRaw = document.getElementById('af-includes').value.trim();
+    const includes = includesRaw ? includesRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [];
+
+    const product = {
+      id, name, price,
+      subtitle: document.getElementById('af-subtitle').value.trim(),
+      emoji: document.getElementById('af-emoji').value.trim() || '📦',
+      tag: document.getElementById('af-tag').value.trim(),
+      priceNote: document.getElementById('af-pricenote').value.trim(),
+      heroImg: document.getElementById('af-heroimg').value.trim(),
+      desc: document.getElementById('af-desc').value.trim(),
+      includes, features,
+      cartName: name,
+      heroBg: 'linear-gradient(135deg, #1a0533, #2d0b5a)',
+      heroGlow: 'radial-gradient(ellipse at 30% 50%, rgba(155,48,255,0.55) 0%, transparent 55%)',
+      _cat: cat, _src: src
+    };
+
+    const btn = document.querySelector('#admin-tab-form .admin-save-btn');
+    btn.textContent = '⏳ Salvando...';
+    const res = await window._saveProduct(product);
+    if (res.ok) {
+      window._fbProducts = window._fbProducts || {};
+      window._fbProducts[id] = product;
+      window.PRODUCTS_DATA[id] = product;
+      renderFbProductCard(id, product);
+      adminRefreshProdList();
+      adminPopulateMediaSelect();
+      _editingProductId = null;
+      document.getElementById('adm-nav-form').style.display = 'none';
+      adminSwitchTab('products');
+      document.querySelectorAll('.adm-nav-btn').forEach(b => {
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').includes("'products'")) b.classList.add('active');
+      });
+      toast('✅ Produto salvo!', '#00e676');
+      btn.textContent = '💾 SALVAR PRODUTO';
+    } else {
+      toast('❌ ' + (res.err || 'Erro Firebase'), '#ff1744');
+      btn.textContent = '💾 SALVAR PRODUTO';
+    }
+  }
+
+  async function adminDeleteProduct(id) {
+    if (!confirm('Deletar "' + id + '"? Essa ação não pode ser desfeita.')) return;
+    const res = await window._deleteProduct(id);
+    if (res.ok) {
+      delete (window._fbProducts || {})[id];
+      delete (window.PRODUCTS_DATA || {})[id];
+      // Remove card from DOM
+      const card = document.querySelector('[data-fb-id="' + id + '"]');
+      if (card) card.remove();
+      adminRefreshProdList();
+      toast('🗑️ Produto deletado.', '#ff1744');
+    } else {
+      toast('❌ ' + (res.err || 'Erro'), '#ff1744');
+    }
+  }
+
+  // ── RENDER FB PRODUCT CARD IN STORE ──────────────────────
+  function renderFbProductCard(id, p) {
+    // Remove old if exists
+    const old = document.querySelector('[data-fb-id="' + id + '"]');
+    if (old) old.remove();
+
+    // Find the right grid
+    const catPanel = p._cat === '7ds' ? '7ds' : 'source';
+    const grid = catPanel === '7ds'
+      ? document.getElementById('7ds-products-grid')
+      : document.querySelector('#source-all .products-grid');
+
+    if (!grid) return;
+
+    const bannerContent = p.heroImg
+      ? `<img src="${p.heroImg}" alt="${p.name}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">`
+      : `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:4rem;opacity:0.25;">${p.emoji||'📦'}</div>`;
+
+    const tagHtml = p.tag ? `<div class="card-tag">${p.tag}</div>` : '';
+
+    const card = document.createElement('div');
+    card.className = 'product-card';
+    card.setAttribute('data-src', p._src || 'saga');
+    card.setAttribute('data-fb-id', id);
+    card.setAttribute('onclick', `openProductPage('${id}')`);
+    card.innerHTML = `
+      <div class="card-banner" style="background:${p.heroBg||'linear-gradient(135deg,#1a0533,#2d0b5a)'}">
+        ${bannerContent}
+      </div>
+      ${tagHtml}
+      <div class="card-body">
+        <div class="card-title">${p.name}</div>
+        <div class="card-desc">${p.desc ? p.desc.substring(0,100)+'…' : ''}</div>
+        <div class="card-meta"><div class="meta-item"><span>📦</span> Estoque: ∞</div></div>
+      </div>
+      <div class="card-footer">
+        <div class="card-price"><span class="price-label">Preço</span><span class="price-value"><span class="price-currency">R$</span>${p.price}</span></div>
+        <button class="add-btn" onclick="event.stopPropagation(); openProductPage('${id}')">Ver Produto →</button>
+      </div>`;
+    grid.appendChild(card);
+  }
+
+  // Render all FB products on load
+  document.addEventListener('fbProductsLoaded', () => {
+    Object.entries(window._fbProducts || {}).forEach(([id, p]) => {
+      if (!p.isDownload) renderFbProductCard(id, p);
+    });
+    adminRefreshProdList();
+    adminPopulateMediaSelect();
+  });
+
+  // ── MEDIA TAB ────────────────────────────────────────────
+  function adminPopulateMediaSelect() {
+    const sel = document.getElementById('adminMediaSelect');
+    const all = getAllProducts();
+    sel.innerHTML = '<option value="">— Selecione —</option>';
+    Object.values(all).filter(p => !p.isDownload).forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id; opt.textContent = p.name || p.id;
+      sel.appendChild(opt);
+    });
+  }
+
+  function adminLoadMediaForm() {
+    const id = document.getElementById('adminMediaSelect').value;
+    const form = document.getElementById('adminMediaForm');
+    if (!id) { form.style.display = 'none'; return; }
+    form.style.display = 'block';
+    const media = (window._pendingMedia || {})[id] || {};
+    document.getElementById('adminMediaVideo').value = media.youtubeId ? 'https://youtu.be/' + media.youtubeId : '';
+    const _sb = media.heroImg || media.banner || '';
+    document.getElementById('adminMediaBanner').value = _sb;
+    const _bPrev = document.getElementById('adminMediaBannerPreview');
+    const _bImg  = document.getElementById('adminMediaBannerImg');
+    if (_sb) { _bImg.src = _sb; _bPrev.style.display = 'block'; }
+    else { _bPrev.style.display = 'none'; }
+    document.getElementById('adminMediaPhotos').value = (media.photos || []).join('\n');
+  }
+
+  function extractYouTubeId(input) {
+    if (!input) return '';
+    // Already just an ID (no slashes or dots)
+    if (/^[a-zA-Z0-9_-]{11}$/.test(input.trim())) return input.trim();
+    // youtu.be/ID
+    let m = input.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
+    if (m) return m[1];
+    // ?v=ID or &v=ID
+    m = input.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+    if (m) return m[1];
+    // /embed/ID
+    m = input.match(/\/embed\/([a-zA-Z0-9_-]{11})/);
+    if (m) return m[1];
+    // fallback: last path segment
+    m = input.match(/\/([a-zA-Z0-9_-]{11})(?:[?&]|$)/);
+    if (m) return m[1];
+    return input.trim();
+  }
+
+  async function adminSaveMedia(type) {
+    const id = document.getElementById('adminMediaSelect').value;
+    if (!id) { toast('⚠️ Selecione um produto primeiro.', '#ff1744'); return; }
+    let res = { ok: false, err: 'tipo inválido' };
+    if (type === 'banner') {
+      const url = document.getElementById('adminMediaBanner').value.trim();
+      try {
+        const { doc: fDoc, setDoc: fSet } = window._fbModules;
+        await fSet(fDoc(window._db, 'product_media', id), { heroImg: url, updatedAt: new Date().toISOString() }, { merge: true });
+        window._pendingMedia = window._pendingMedia || {};
+        window._pendingMedia[id] = window._pendingMedia[id] || {};
+        window._pendingMedia[id].heroImg = url;
+        if (window.PRODUCTS_DATA?.[id]) window.PRODUCTS_DATA[id].heroImg = url;
+        if (window._fbProducts?.[id])   window._fbProducts[id].heroImg = url;
+        // Atualiza imagem no card (Firebase e estático)
+        let cardBanner = document.querySelector('[data-fb-id="' + id + '"] .card-banner');
+        if (!cardBanner) {
+          const sc = document.querySelector('[onclick="openProductPage(\'' + id + '\')"]');
+          if (sc) cardBanner = sc.querySelector('.card-banner');
+        }
+        if (cardBanner) {
+          let img = cardBanner.querySelector('img');
+          if (!img && url) { img = document.createElement('img'); img.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;'; cardBanner.appendChild(img); }
+          if (img) img.src = url;
+        }
+        // preview no admin
+        const _bPrev = document.getElementById('adminMediaBannerPreview');
+        const _bImg  = document.getElementById('adminMediaBannerImg');
+        if (url) { _bImg.src = url; _bPrev.style.display = 'block'; } else { _bPrev.style.display = 'none'; }
+        res = { ok: true };
+        toast('✅ Banner salvo!', '#00e676');
+      } catch(e) { res = { ok: false, err: e.message }; }
+    } else if (type === 'video') {
+      const vid = extractYouTubeId(document.getElementById('adminMediaVideo').value.trim());
+      res = await window._saveMedia(id, vid, undefined);
+      if (res.ok) {
+        window._pendingMedia = window._pendingMedia || {};
+        window._pendingMedia[id] = window._pendingMedia[id] || {};
+        window._pendingMedia[id].youtubeId = vid;
+        if (window.PRODUCTS_DATA[id]) window.PRODUCTS_DATA[id].youtubeId = vid;
+        toast('✅ Vídeo salvo!', '#00e676');
+      }
+    } else {
+      const raw = document.getElementById('adminMediaPhotos').value.trim();
+      const photos = raw.split('\n').map(s=>s.trim()).filter(s=>s.startsWith('http'));
+      res = await window._saveMedia(id, undefined, photos);
+      if (res.ok) {
+        window._pendingMedia = window._pendingMedia || {};
+        window._pendingMedia[id] = window._pendingMedia[id] || {};
+        window._pendingMedia[id].photos = photos;
+        if (window.PRODUCTS_DATA[id]) window.PRODUCTS_DATA[id].photos = photos;
+        toast('✅ Fotos salvas!', '#00e676');
+      }
+    }
+    if (res && !res.ok) toast('❌ ' + (res.err || 'Erro'), '#ff1744');
+  }
+
+  // ── DOWNLOAD LINKS TAB ───────────────────────────────────
+  const DOWNLOAD_ITEMS = [
+    { id: 'launcher-venus',     label: '🚀 Launcher Venus' },
+    { id: 'modpack-curseforge', label: '🔥 Modpack — CurseForge' },
+    { id: 'modpack-modrinth',   label: '🌿 Modpack — Modrinth' },
+    { id: 'modpack-technic',    label: '⚙️ Modpack — Technic' },
+    { id: 'textura-curseforge', label: '🎨 Textura — CurseForge' },
+    { id: 'textura-mediafire',  label: '🔴 Textura — Mediafire' },
+    { id: 'textura-planetmc',   label: '🌍 Textura — Planet MC' },
+    { id: 'textura-modrinth',   label: '🌿 Textura — Modrinth' },
+  ];
+
+  function adminPopulateLinks() {
+    const container = document.getElementById('adminLinksList');
+    container.innerHTML = DOWNLOAD_ITEMS.map(item => {
+      const cached = (window._pendingMedia || {})[item.id];
+      const val = cached ? (cached.downloadUrl || cached.youtubeId || '') : '';
+      const icon = item.label.split(' ')[0];
+      const name = item.label.split(' ').slice(1).join(' ');
+      return `<div class="adm-link-card">
+        <div class="adm-link-icon">${icon}</div>
+        <div class="adm-link-inner">
+          <div class="adm-link-label">${name}</div>
+          <input class="adm-link-input" id="dl-${item.id}" placeholder="https://..." value="${val}">
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  async function adminSaveAllLinks() {
+    let saved = 0, failed = 0;
+    for (const item of DOWNLOAD_ITEMS) {
+      const link = document.getElementById('dl-' + item.id)?.value.trim();
+      const res = await window._saveMedia(item.id, link || '', undefined);
+      if (res.ok) {
+        window._pendingMedia = window._pendingMedia || {};
+        window._pendingMedia[item.id] = window._pendingMedia[item.id] || {};
+        window._pendingMedia[item.id].downloadUrl = link;
+        saved++;
+      } else { failed++; }
+    }
+    renderDownloadCards();
+    if (saved) toast(`✅ ${saved} link(s) salvo(s)!`, '#00e676');
+    if (failed) toast(`❌ ${failed} erro(s).`, '#ff1744');
+  }
+
+  function renderDownloadCards() {
+    const DL_DEFS = {
+      launcher: [
+        { id: 'launcher-venus', icon: '🚀', label: 'Launcher Venus', desc: 'Launcher oficial da Venus Store. Instala todos os modpacks automaticamente.' }
+      ],
+      modpack: [
+        { id: 'modpack-curseforge', icon: '🔥', label: 'Modpack — CurseForge', desc: 'Download via CurseForge. Requer app CurseForge instalado.' },
+        { id: 'modpack-modrinth',   icon: '🌿', label: 'Modpack — Modrinth', desc: 'Download via Modrinth. Compatível com PrismLauncher.' },
+        { id: 'modpack-technic',    icon: '⚙️', label: 'Modpack — Technic', desc: 'Download via Technic Launcher. Instalação automática.' },
+      ],
+      textura: [
+        { id: 'textura-curseforge', icon: '🔥', label: 'Textura — CurseForge', desc: 'Download via CurseForge.' },
+        { id: 'textura-mediafire',  icon: '🔴', label: 'Textura — Mediafire', desc: 'Download direto via Mediafire.' },
+        { id: 'textura-planetmc',   icon: '🌍', label: 'Textura — Planet MC', desc: 'Download via Planet Minecraft.' },
+        { id: 'textura-modrinth',   icon: '🌿', label: 'Textura — Modrinth', desc: 'Download via Modrinth.' },
+      ]
+    };
+
+    let anyVisible = false;
+    ['launcher','modpack','textura'].forEach(type => {
+      const section = document.getElementById('dl-cards-' + type);
+      const grid = document.getElementById('dl-grid-' + type);
+      if (!section || !grid) return;
+      const items = DL_DEFS[type].filter(item => {
+        const m = window._pendingMedia?.[item.id];
+        return m && (m.downloadUrl || m.youtubeId);
+      });
+      if (items.length === 0) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      anyVisible = true;
+      grid.innerHTML = items.map(item => {
+        const m = window._pendingMedia[item.id];
+        const link = m.downloadUrl || m.youtubeId;
+        return `<div class="product-card dl-card" onclick="window.open('${link}','_blank')">
+          <div class="card-banner" style="background:linear-gradient(135deg,#0d0d20,#1a1a35)">
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:3.5rem;opacity:0.25;">${item.icon}</div>
+          </div>
+          <div class="card-body">
+            <div class="card-title">${item.label}</div>
+            <div class="card-desc">${item.desc}</div>
+          </div>
+          <div class="card-footer">
+            <div class="card-price"><span class="price-label">Acesso</span><span class="price-value" style="font-size:1rem;color:var(--green);">Gratuito</span></div>
+            <button class="add-btn" onclick="event.stopPropagation();window.open('${link}','_blank')">⬇ Download</button>
+          </div>
+        </div>`;
+      }).join('');
+    });
+
+    const emptyState = document.getElementById('dlEmptyState');
+    if (emptyState) emptyState.style.display = anyVisible ? 'none' : '';
+  }
+
+  // Render download cards on Firebase load
+  document.addEventListener('videosLoaded', () => { renderDownloadCards(); });
+
+  // ── ROLES TAB ─────────────────────────────────────────────
+  const PERM_LABELS = {
+    manage_products: '📦 Produtos',
+    manage_media:    '🖼️ Mídia',
+    manage_links:    '🔗 Downloads',
+    manage_roles:    '🛡️ Cargos',
+  };
+
+  async function adminRefreshRoles() {
+    const list = document.getElementById('rolesList');
+    if (!list) return;
+    if (!window._firebaseReady) {
+      list.innerHTML = '<div style="color:var(--muted);font-family:\'Rajdhani\',sans-serif;font-size:0.85rem;">Firebase não conectado.</div>';
+      return;
+    }
+    list.innerHTML = '<div style="color:var(--muted);font-family:\'Rajdhani\',sans-serif;font-size:0.85rem;">Carregando...</div>';
+    try {
+      const { collection, getDocs } = window._fbModules;
+      const snap = await getDocs(collection(window._db, 'admin_roles'));
+      if (snap.empty) {
+        list.innerHTML = '<div style="color:var(--muted);font-family:\'Rajdhani\',sans-serif;font-size:0.85rem;">Nenhum cargo cadastrado ainda.</div>';
+        return;
+      }
+      list.innerHTML = '';
+      snap.forEach(docSnap => {
+        const d = docSnap.data();
+        const uid = docSnap.id;
+        const perms = Object.keys(PERM_LABELS).filter(p => d[p]);
+        const card = document.createElement('div');
+        card.className = 'role-card';
+        card.innerHTML = `
+          <div class="role-card-info">
+            <div class="role-card-name">${d.roleName || 'Sem nome'}</div>
+            <div class="role-card-uid">${uid}</div>
+            <div class="role-card-perms">
+              ${perms.length ? perms.map(p => `<span class="role-perm-badge">${PERM_LABELS[p]}</span>`).join('') : '<span style="color:var(--muted);font-size:0.72rem;font-family:\'Rajdhani\',sans-serif;">Sem permissões</span>'}
+            </div>
+          </div>
+          <div class="adm-prod-actions">
+            <button class="adm-btn-edit" onclick="adminEditRole('${uid}', ${JSON.stringify(d).replace(/"/g,'&quot;')})">✏️ Editar</button>
+            <button class="adm-btn-del" onclick="adminDeleteRole('${uid}')">🗑</button>
+          </div>`;
+        list.appendChild(card);
+      });
+    } catch(e) {
+      list.innerHTML = `<div style="color:var(--red);font-family:'Rajdhani',sans-serif;font-size:0.85rem;">Erro: ${e.message}</div>`;
+    }
+  }
+
+  function adminEditRole(uid, data) {
+    document.getElementById('roleUidInput').value = uid;
+    document.getElementById('roleNameInput').value = data.roleName || '';
+    Object.keys(PERM_LABELS).forEach(p => {
+      const el = document.getElementById('perm_' + p);
+      if (el) el.checked = !!data[p];
+    });
+    document.getElementById('roleFormMsg').textContent = '';
+    document.getElementById('roleUidInput').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  async function adminDeleteRole(uid) {
+    if (!confirm('Remover cargo de ' + uid + '? O usuário ficará sem restrições se for conta raiz, ou sem acesso ao painel.')) return;
+    try {
+      const { doc: fDoc } = window._fbModules;
+      const { deleteDoc } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+      await deleteDoc(fDoc(window._db, 'admin_roles', uid));
+      toast('✅ Cargo removido.', '#00e676');
+      adminRefreshRoles();
+    } catch(e) {
+      toast('❌ ' + e.message, '#ff1744');
+    }
+  }
+
+  async function adminSaveRole() {
+    const uid = document.getElementById('roleUidInput').value.trim();
+    const name = document.getElementById('roleNameInput').value.trim();
+    const msg = document.getElementById('roleFormMsg');
+    if (!uid) { msg.style.color = 'var(--red)'; msg.textContent = '⚠️ UID obrigatório.'; return; }
+    const roleData = { roleName: name || 'Sem nome' };
+    Object.keys(PERM_LABELS).forEach(p => {
+      roleData[p] = !!(document.getElementById('perm_' + p)?.checked);
+    });
+    msg.style.color = 'var(--muted)'; msg.textContent = '⏳ Salvando...';
+    const res = await window._saveAdminRole(uid, roleData);
+    if (res.ok) {
+      msg.style.color = 'var(--green)'; msg.textContent = '✅ Cargo salvo!';
+      adminRefreshRoles();
+      // Clear form
+      document.getElementById('roleUidInput').value = '';
+      document.getElementById('roleNameInput').value = '';
+      Object.keys(PERM_LABELS).forEach(p => { const el = document.getElementById('perm_' + p); if (el) el.checked = false; });
+    } else {
+      msg.style.color = 'var(--red)'; msg.textContent = '❌ ' + (res.err || 'Erro');
     }
   }
 
@@ -1848,16 +3189,18 @@
       b.textContent = user ? '⚙ Admin ✓' : '⚙ Admin';
       b.classList.toggle('logged', !!user);
     });
-    // Show/hide admin panel on product page if open
-    const panel = document.getElementById('ppAdminPanel');
-    if (panel) panel.classList.toggle('visible', !!user);
+    // admin panel removed from product page — managed via Admin dashboard
   });
 
   // ===== NAVIGATION =====
-  function goToStore() {
+  function goToStore(cat) {
     document.getElementById('view-store').classList.add('active');
     document.getElementById('view-product').classList.remove('active');
     window.scrollTo({ top: 0, behavior: 'instant' });
+    if (cat) {
+      const btn = document.querySelector(`.h-cat-tab[onclick*="'${cat}'"]`);
+      switchCategory(cat, btn);
+    }
   }
   function goToProduct() {
     document.getElementById('view-store').classList.remove('active');
@@ -2005,7 +3348,7 @@
   }
 
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeCart(); closeAdminModal(); closeLightboxBtn(); }
+    if (e.key === 'Escape') { closeCart(); closeAdminModal(); closeLightboxBtn(); closeAdminDash(); }
     if (e.key === 'ArrowRight') lightboxNext(e);
     if (e.key === 'ArrowLeft') lightboxPrev(e);
   });
