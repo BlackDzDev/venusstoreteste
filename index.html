@@ -6,15 +6,11 @@
 <title>Venus Store</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Bebas+Neue&family=Exo+2:wght@300;400;600;700;900&display=swap" rel="stylesheet">
 
-<!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
   import { getFirestore, doc, setDoc, getDoc, collection, getDocs } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
   import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-  // ========================
-  // CONFIGURE SUA FIREBASE AQUI
-  // ========================
 const firebaseConfig = {
   apiKey: "AIzaSyC5-38DHtoOg-SjO5q5MOeHrQCqkqRxpyI",
   authDomain: "venus-store-8808c.firebaseapp.com",
@@ -38,7 +34,7 @@ const firebaseConfig = {
     console.warn('Firebase não configurado — modo offline ativo.');
   }
 
-  // Carrega vídeos do Firebase quando pronto
+
   if (window._firebaseReady) {
     window._fbModules.onAuthStateChanged(auth, async user => {
       window._adminUser = user;
@@ -56,15 +52,14 @@ const firebaseConfig = {
     loadAllVideos();
   }
 
-  // Helper: checa se o admin tem permissão
+
   window._hasPermission = function(perm) {
     if (!window._adminUser) return false;
     const role = window._adminRole;
-    if (!role) return true; // sem role = acesso total (conta raiz)
+    if (!role) return true; 
     return !!role[perm];
   };
 
-  // Salva/atualiza role de um usuário (só quem tem manage_roles pode)
   window._saveAdminRole = async function(uid, roleData) {
     if (!window._firebaseReady || !window._adminUser) return { ok: false, err: 'Sem permissão.' };
     if (!window._hasPermission('manage_roles')) return { ok: false, err: 'Você não tem permissão para gerenciar cargos.' };
@@ -77,7 +72,7 @@ const firebaseConfig = {
 
   async function loadAllVideos() {
     try {
-      // Try new collection first, fall back to old
+
       let snap;
       try { snap = await getDocs(collection(db, 'product_media')); }
       catch(_) { snap = await getDocs(collection(db, 'product_videos')); }
@@ -85,7 +80,7 @@ const firebaseConfig = {
         const data = d.data();
         window._pendingMedia = window._pendingMedia || {};
         window._pendingMedia[d.id] = data;
-        // compat
+
         if (data.youtubeId) {
           const prod = window.PRODUCTS_DATA?.[d.id];
           if (prod) prod.youtubeId = data.youtubeId;
@@ -102,7 +97,7 @@ const firebaseConfig = {
           window._pendingMedia = window._pendingMedia || {};
           window._pendingMedia[d.id] = window._pendingMedia[d.id] || {};
           window._pendingMedia[d.id].heroImg = data.heroImg;
-          // Atualiza card estático no DOM
+  
           let cardBanner = document.querySelector('[data-fb-id="' + d.id + '"] .card-banner');
           if (!cardBanner) {
             const sc = document.querySelector('[onclick="openProductPage(\'' + d.id + '\')"]');
@@ -130,7 +125,7 @@ const firebaseConfig = {
       const payload = { updatedAt: new Date().toISOString() };
       if (youtubeId !== undefined) payload.youtubeId = youtubeId;
       if (photos !== undefined) payload.photos = photos;
-      // Use merge so we dont overwrite existing fields
+
       await fSet(fDoc(db, 'product_media', productId), payload, { merge: true });
       return { ok: true };
     } catch(e) {
@@ -138,10 +133,10 @@ const firebaseConfig = {
       return { ok: false, err: e.message || 'Erro desconhecido.' };
     }
   };
-  // compat
+
   window._saveVideo = (id, vid) => window._saveMedia(id, vid, undefined);
 
-  // keep old name for compat
+
   window._saveVideo = async function(productId, youtubeId) {
     return window._saveMedia(productId, youtubeId, undefined);
   };
